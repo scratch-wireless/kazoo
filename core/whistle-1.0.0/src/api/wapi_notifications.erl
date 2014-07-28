@@ -326,7 +326,7 @@
 
 %% Notify webhook
 -define(WEBHOOK_HEADERS, [<<"Hook">>, <<"Data">>]).
--define(OPTIONAL_WEBHOOK_HEADERS, []).
+-define(OPTIONAL_WEBHOOK_HEADERS, [<<"Timestamp">>]).
 -define(WEBHOOK_VALUES, [{<<"Event-Category">>, <<"notification">>}
                               ,{<<"Event-Name">>, <<"webhook">>}
                              ]).
