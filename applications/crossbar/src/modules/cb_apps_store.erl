@@ -61,8 +61,13 @@ authenticate(_) -> 'false'.
 %% allowed to access the resource, or false if not.
 %% @end
 %%--------------------------------------------------------------------
--spec authorize(cb_context:context()) -> 'false'.
-authorize(_) -> 'false'.
+-spec authorize(cb_context:context()) -> boolean().
+authorize(Context) ->
+    authorize(cb_context:req_nouns(Context), cb_context:req_verb(Context)).
+
+-spec authorize(req_nouns(), http_method()) -> boolean().
+authorize([{<<"apps_store">>, _}|_], ?HTTP_GET) ->
+    'true'.
 
 %%--------------------------------------------------------------------
 %% @public
@@ -274,7 +279,11 @@ summary(Context) ->
 %%--------------------------------------------------------------------
 -spec normalize_view_results(wh_json:object(), wh_json:objects()) -> wh_json:objects().
 normalize_view_results(JObj, Acc) ->
-    [wh_json:get_value(<<"value">>, JObj)|Acc].
+    case wh_json:is_true([<<"value">>, <<"published">>], JObj, 'true') of
+        'false' -> Acc;
+        'true' ->
+            [wh_json:get_value(<<"value">>, JObj)|Acc]
+    end.
 
 -spec set_master_account_db(cb_context:context()) -> cb_context:context().
 set_master_account_db(Context) ->

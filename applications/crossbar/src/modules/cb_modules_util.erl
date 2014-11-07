@@ -39,15 +39,15 @@ bind(Module, Bindings) ->
 %%--------------------------------------------------------------------
 -spec reconcile_services(cb_context:context()) -> cb_context:context().
 reconcile_services(Context) ->
-    reconcile_services(Context, cb_context:req_verb(Context), cb_context:resp_status(Context)).
-
-reconcile_services(Context, <<"GET">>, 'success') -> Context;
-reconcile_services(Context, _Verb, 'success') ->
-    lager:debug("successful ~s, reconciling services", [_Verb]),
-    _ = wh_services:reconcile(cb_context:account_id(Context), <<"devices">>),
-    Context;
-reconcile_services(Context, _Verb, _Status) ->
-    Context.
+    case cb_context:resp_status(Context) =:= 'success'
+        andalso cb_context:req_verb(Context) =/= <<"GET">>
+    of
+        'false' -> Context;
+        'true' ->
+            lager:debug("maybe reconciling services for account ~s"
+                       ,[cb_context:account_id(Context)]),
+            _ = wh_services:save_as_dirty(cb_context:account_id(Context))
+    end.
 
 -spec pass_hashes(ne_binary(), ne_binary()) -> {ne_binary(), ne_binary()}.
 pass_hashes(Username, Password) ->

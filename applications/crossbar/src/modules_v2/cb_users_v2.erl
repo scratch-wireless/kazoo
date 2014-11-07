@@ -57,7 +57,8 @@ init() ->
     _ = crossbar_bindings:bind(<<"v2_resource.execute.put.users">>, ?MODULE, 'put'),
     _ = crossbar_bindings:bind(<<"v2_resource.execute.post.users">>, ?MODULE, 'post'),
     _ = crossbar_bindings:bind(<<"v2_resource.execute.delete.users">>, ?MODULE, 'delete'),
-    _ = crossbar_bindings:bind(<<"v2_resource.execute.patch.users">>, ?MODULE, 'patch').
+    _ = crossbar_bindings:bind(<<"v2_resource.execute.patch.users">>, ?MODULE, 'patch'),
+    crossbar_bindings:bind(<<"v2_resource.finish_request.*.users">>, 'cb_modules_util', 'reconcile_services').
 
 %%--------------------------------------------------------------------
 %% @public
@@ -218,7 +219,7 @@ put_resp('false', Context) ->
 
 -spec dry_run(cb_context:context()) -> wh_json:object().
 dry_run(Context) ->
-    JObj = cb_context:req_data(Context),
+    JObj = cb_context:doc(Context),
     AccountId = cb_context:account_id(Context),
 
     UserType = wh_json:get_value(<<"priv_level">>, JObj),
