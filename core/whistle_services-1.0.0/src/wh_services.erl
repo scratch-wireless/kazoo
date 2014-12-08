@@ -47,6 +47,8 @@
 
 -export([calculate_charges/2]).
 
+-export([dry_run/2, dry_run/3]).
+
 -include("whistle_services.hrl").
 
 -record(wh_services, {account_id :: api_binary()
@@ -219,7 +221,7 @@ save_as_dirty(#wh_services{jobj=JObj
         {'ok', SavedJObj} ->
             lager:debug("marked services as dirty for account ~s", [AccountId]),
             Services#wh_services{jobj=JObj
-                                 ,status=wh_json:get_ne_value(<<"pvt_status">>, SavedJObj, <<"good_stainding">>)
+                                 ,status=wh_json:get_ne_value(<<"pvt_status">>, SavedJObj, <<"good_standing">>)
                                  ,deleted=wh_json:is_true(<<"pvt_deleted">>, SavedJObj)
                                  ,dirty='true'
                                 };
@@ -800,6 +802,28 @@ calculate_transactions_charges(Transactions) ->
       ,wh_json:new()
       ,wh_transactions:to_json(Transactions)
      ).
+
+%%--------------------------------------------------------------------
+%% @public
+%% @doc
+%%
+%% @end
+%%--------------------------------------------------------------------
+-spec dry_run(ne_binary(), [{ne_binary(), ne_binary(), integer()}]) -> wh_json:object().
+-spec dry_run(ne_binary(), [{ne_binary(), ne_binary(), integer()}], any()) -> wh_json:object().
+dry_run(Account, Updates) ->
+    dry_run(Account, Updates, []).
+
+dry_run(Account, Updates, Transactions) ->
+    Services = fetch(Account),
+    UpdatedServices = dry_run_update(Updates, Services),
+    calculate_charges(UpdatedServices, Transactions).
+
+-spec dry_run_update([{ne_binary(), ne_binary(), integer()}], services()) -> services().
+dry_run_update([], Services) -> Services;
+dry_run_update([{Category, Classification, Quantity}|Updates], Services) ->
+    NewServices = wh_services:update(Category, Classification, Quantity, Services),
+    dry_run_update(Updates, NewServices).
 
 %%%===================================================================
 %%% Internal functions

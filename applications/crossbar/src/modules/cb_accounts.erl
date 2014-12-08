@@ -44,6 +44,7 @@
 -define(DESCENDANTS, <<"descendants">>).
 -define(SIBLINGS, <<"siblings">>).
 -define(API_KEY, <<"api_key">>).
+-define(TREE, <<"tree">>).
 
 -define(REMOVE_SPACES, [<<"realm">>]).
 -define(MOVE, <<"move">>).
@@ -95,6 +96,7 @@ allowed_methods(_, Path) ->
               ,?DESCENDANTS
               ,?SIBLINGS
               ,?API_KEY
+              ,?TREE
              ],
     case lists:member(Path, Paths) of
         'true' -> [?HTTP_GET];
@@ -120,6 +122,7 @@ resource_exists(_, Path) ->
               ,?SIBLINGS
               ,?API_KEY
               ,?MOVE
+              ,?TREE
              ],
     lists:member(Path, Paths).
 
@@ -213,6 +216,12 @@ validate_account_path(Context, AccountId, ?MOVE, ?HTTP_POST) ->
                 'true' -> cb_context:set_resp_status(Context, 'success');
                 'false' -> cb_context:add_system_error('forbidden', [], Context)
             end
+    end;
+validate_account_path(Context, AccountId, ?TREE, ?HTTP_GET) ->
+    Context1 = crossbar_doc:load(AccountId, prepare_context('undefined', Context)),
+    case cb_context:resp_status(Context1) of
+        'success' -> load_account_tree(Context1);
+        _Else -> Context1
     end.
 
 %%--------------------------------------------------------------------
@@ -673,23 +682,15 @@ load_children_v1(AccountId, Context) ->
 
 -spec load_paginated_children(ne_binary(), cb_context:context()) -> cb_context:context().
 load_paginated_children(AccountId, Context) ->
-    StartKey = crossbar_doc:start_key(Context),
+    StartKey = start_key(Context),
     fix_envelope(
       crossbar_doc:load_view(?AGG_VIEW_CHILDREN
-                             ,[{'startkey', start_key(AccountId, StartKey)}
+                             ,[{'startkey', [AccountId, StartKey]}
                                ,{'endkey', [AccountId, wh_json:new()]}
                               ]
                              ,Context
                              ,fun normalize_view_results/2
                             )).
-
--spec start_key(ne_binary(), api_binary()) -> ne_binaries().
-start_key(AccountId, 'undefined') ->
-    [AccountId];
-start_key(AccountId, AccountId) ->
-    [AccountId];
-start_key(AccountId, StartKey) ->
-    [AccountId, StartKey].
 
 %%--------------------------------------------------------------------
 %% @private
@@ -714,12 +715,12 @@ load_descendants_v1(AccountId, Context) ->
 
 -spec load_paginated_descendants(ne_binary(), cb_context:context()) -> cb_context:context().
 load_paginated_descendants(AccountId, Context) ->
-    StartKey = crossbar_doc:start_key(Context),
+    StartKey = start_key(Context),
     lager:debug("account ~s startkey ~s", [AccountId, StartKey]),
     fix_envelope(
       crossbar_doc:load_view(?AGG_VIEW_DESCENDANTS
-                             ,[{'startkey', start_key(AccountId, StartKey)}
-                               ,{'endkey', [AccountId, wh_json:new()]}
+                             ,[{'startkey', [AccountId, StartKey]}
+                               ,{'endkey',  [AccountId, wh_json:new()]}
                               ]
                              ,Context
                              ,fun normalize_view_results/2
@@ -777,20 +778,31 @@ load_siblings_results(_AccountId, Context, [JObj|_]) ->
 load_siblings_results(AccountId, Context, _) ->
     cb_context:add_system_error('bad_identifier', [{'details', AccountId}],  Context).
 
+
+-spec start_key(cb_context:context()) -> binary().
+start_key(Context) ->
+    case crossbar_doc:start_key(Context) of
+        'undefined' -> <<>>;
+        Key -> Key
+    end.
+
 -spec fix_envelope(cb_context:context()) -> cb_context:context().
 fix_envelope(Context) ->
     cb_context:set_resp_envelope(
-      Context
-      ,lists:foldl(fun(Key, Env) ->
-                           lager:debug("maybe fixing ~s: ~p", [Key, wh_json:get_value(Key, Env)]),
-                           case fix_start_key(wh_json:get_value(Key, Env)) of
-                               'undefined' -> wh_json:delete_key(Key, Env);
-                               V -> wh_json:set_value(Key, V, Env)
-                           end
-                   end
-                   ,cb_context:resp_envelope(Context)
-                   ,[<<"start_key">>, <<"next_start_key">>]
-                  )).
+        cb_context:set_resp_data(Context, lists:reverse(cb_context:resp_data(Context)))
+        ,lists:foldl(
+            fun fix_envelope_fold/2
+            ,cb_context:resp_envelope(Context)
+            ,[<<"start_key">>, <<"next_start_key">>]
+        )
+    ).
+
+-spec fix_envelope_fold(binary(), wh_json:object()) -> wh_json:object().
+fix_envelope_fold(Key, JObj) ->
+    case fix_start_key(wh_json:get_value(Key, JObj)) of
+        'undefined' -> wh_json:delete_key(Key, JObj);
+        V -> wh_json:set_value(Key, V, JObj)
+    end.
 
 -spec fix_start_key(api_binary() | list()) -> api_binary().
 fix_start_key('undefined') -> 'undefined';
@@ -799,6 +811,36 @@ fix_start_key([StartKey]) -> StartKey;
 fix_start_key([_AccountId, [_|_]=Keys]) -> lists:last(Keys);
 fix_start_key([_AccountId, StartKey]) -> StartKey;
 fix_start_key([StartKey|_T]) -> StartKey.
+
+-spec load_account_tree(cb_context:context()) -> cb_context:context().
+load_account_tree(Context) ->
+    Tree = get_authorized_account_tree(Context),
+    Options = [{'keys', Tree}, 'include_docs'],
+    case couch_mgr:all_docs(?WH_ACCOUNTS_DB, Options) of
+        {'error', R} -> crossbar_doc:handle_couch_mgr_errors(R, ?WH_ACCOUNTS_DB, Context);
+        {'ok', JObjs} -> format_account_tree_results(Context, JObjs)
+    end.
+
+-spec get_authorized_account_tree(cb_context:context()) -> ne_binaries().
+get_authorized_account_tree(Context) ->
+    Doc = cb_context:doc(Context),
+    Tree = wh_json:get_value(<<"pvt_tree">>, Doc, []),
+    AuthAccountId = cb_context:auth_account_id(Context),
+    AuthorizedTree =
+        lists:dropwhile(
+            fun(E) -> E =/= AuthAccountId end
+            ,Tree
+        ),
+    AuthorizedTree.
+
+-spec format_account_tree_results(cb_context:context(), wh_json:objects()) -> cb_context:context().
+format_account_tree_results(Context, JObjs) ->
+    RespData =
+        [wh_json:from_list([
+          {<<"id">>, wh_json:get_value(<<"id">>, JObj)}
+          ,{<<"name">>, wh_json:get_value([<<"doc">>, <<"name">>], JObj)}
+         ]) || JObj <- JObjs],
+    cb_context:set_resp_data(Context, RespData).
 
 %%--------------------------------------------------------------------
 %% @private
