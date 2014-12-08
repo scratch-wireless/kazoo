@@ -287,6 +287,16 @@ is_device_enabled(JObj) ->
     Default = whapps_config:get_is_true(?CONFIG_CAT, <<"device_enabled_default">>, 'true'),
     case wh_json:is_true([<<"doc">>, <<"enabled">>], JObj, Default) of
         'true' -> 'true';
+        'false' -> maybe_allow_authn_for_disabled_device(JObj)
+    end.
+
+-spec maybe_allow_authn_for_disabled_device(wh_json:object()) -> boolean().
+maybe_allow_authn_for_disabled_device(JObj) ->
+    case whapps_config:get_is_true(?CONFIG_CAT, <<"allow_disabled_devices">>, 'false') of
+        'true' ->
+            lager:debug("allowing authn for disabled device ~s"
+                         ,[wh_json:get_value(<<"id">>, JObj)]),
+            'true';
         'false' ->
             lager:notice("rejecting authn for disabled device ~s"
                          ,[wh_json:get_value(<<"id">>, JObj)]),
