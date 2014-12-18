@@ -32,6 +32,8 @@
          ,start_link/4
         ]).
 
+-export([start_listener/2]).
+
 -export([queue_name/1
          ,bindings/1
          ,responders/1
@@ -488,6 +490,21 @@ handle_cast({'$execute', Function}=Msg
     {'noreply', State};
 handle_cast({'$client_cast', Message}, State) ->
     handle_module_cast(Message, State);
+handle_cast({'start_listener', Params}, #state{queue='undefined'
+                                              ,is_consuming='false'
+                                              ,responders=[]
+                                              ,bindings=[]
+                                              ,params=[]
+                                               }=State) ->
+    #state{module=Module
+           ,module_state=ModuleState
+           ,module_timeout_ref=TimeoutRef
+          } = State,
+    {'ok', #state{}=N} = init(Module, Params, ModuleState, TimeoutRef),
+    {'noreply', N};
+handle_cast({'start_listener', _Params}, State) ->
+    lager:debug("gen listener asked to start listener but it is already initialized"),
+    {'noreply', State};
 handle_cast(Message, State) ->
     handle_module_cast(Message, State).
 
@@ -995,6 +1012,7 @@ start_initial_bindings(State, Params) ->
                ).
 
 -spec channel_requisition(wh_proplist()) -> boolean().
+channel_requisition([]) -> 'false';
 channel_requisition(Params) ->
     case props:get_value('broker_tag', Params) of
         'undefined' ->
@@ -1008,3 +1026,7 @@ channel_requisition(Params) ->
                 Broker -> wh_amqp_channel:requisition(Broker)
             end
     end.
+
+-spec start_listener(pid(), wh_proplist()) -> 'ok'.
+start_listener(Srv, Params) ->
+    gen_server:cast(Srv, {'start_listener', Params}).
