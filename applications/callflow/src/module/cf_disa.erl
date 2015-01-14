@@ -267,7 +267,26 @@ is_valid_caller_id(_, _) -> 'true'.
 should_restrict_call(Data, Call, Number) ->
     case wh_json:is_true(<<"enforce_call_restriction">>, Data, 'false') of
         'false' -> 'false';
-        'true' -> should_restrict_call_by_account(Call, Number)
+        'true' -> 
+            Classification = wnm_util:classify_number(Number),
+            lager:info("classified number as ~p", [Classification]),
+            should_restrict_call_by_classification(Data, Call, Classification)
+    end.
+
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% @end
+%%--------------------------------------------------------------------
+-spec should_restrict_call_by_classification(wh_json:object(), whapps_call:call(), ne_binary()) -> boolean().
+should_restrict_call_by_classification(Data, Call, Classification) ->
+    case should_restrict_call_by_account(Call, Classification) of
+        'true' -> 
+            lager:info("call is restricted at the account level", []),
+            'true';
+        'false' ->
+            lager:info("call is not restricted at the account level", []),
+            should_restrict_call_by_device(Data, Call, Classification)
     end.
 
 %%--------------------------------------------------------------------
@@ -276,13 +295,30 @@ should_restrict_call(Data, Call, Number) ->
 %% @end
 %%--------------------------------------------------------------------
 -spec should_restrict_call_by_account(whapps_call:call(), ne_binary()) -> boolean().
-should_restrict_call_by_account(Call, Number) ->
+should_restrict_call_by_account(Call, Classification) ->
     AccountId = whapps_call:account_id(Call),
     AccountDb = whapps_call:account_db(Call),
     case couch_mgr:open_cache_doc(AccountDb, AccountId) of
-        {'error', _} -> 'false';
+        {'error', _E} -> 
+            lager:error("failed to open account doc: ~p", [_E]),
+            'false';
         {'ok', JObj} ->
-            Classification = wnm_util:classify_number(Number),
-            lager:info("classified number as ~p", [Classification]),
+            wh_json:get_value([<<"call_restriction">>, Classification, <<"action">>], JObj) =:= <<"deny">>
+    end.
+
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% @end
+%%--------------------------------------------------------------------
+-spec should_restrict_call_by_device(wh_json:object(), whapps_call:call(), ne_binary()) -> boolean().
+should_restrict_call_by_device(Data, Call, Classification) ->
+    AccountDb = whapps_call:account_db(Call),
+    DeviceId =  wh_json:get_ne_value([<<"device_id">>], Data),
+    case couch_mgr:open_cache_doc(AccountDb, DeviceId) of
+        {'error', _E} -> 
+            lager:error("failed to open device doc: ~p", [_E]),
+            'false';
+        {'ok', JObj} ->
             wh_json:get_value([<<"call_restriction">>, Classification, <<"action">>], JObj) =:= <<"deny">>
     end.
