@@ -108,12 +108,13 @@
 %% @end
 %%--------------------------------------------------------------------
 start_link(Args) ->
-    gen_listener:start_link(?MODULE, [{'bindings', ?BINDINGS}
+    gen_listener:start_link(?MODULE, [{'bindings', maybe_bindings(Args)}
                                       ,{'responders', ?RESPONDERS}
-                                      ,{'queue_name', ?QUEUE_NAME}
+                                      ,{'queue_name', maybe_queuename(Args)}
                                       ,{'queue_options', ?QUEUE_OPTIONS}
                                       ,{'consume_options', ?CONSUME_OPTIONS}
                                       | maybe_broker(Args)
+                                      ++ maybe_exchanges(Args)
                                      ], [Args]).
 
 -spec maybe_broker(wh_proplist()) -> wh_proplist().
@@ -121,6 +122,27 @@ maybe_broker(Args) ->
     case props:get_value('amqp_broker', Args) of
         'undefined' -> [];
         Broker -> [{'broker', Broker}]
+    end.
+
+-spec maybe_queuename(wh_proplist()) -> binary().
+maybe_queuename(Args) ->
+    case props:get_value('amqp_queuename_start', Args) of
+        'undefined' -> ?QUEUE_NAME;
+        QueueStart -> <<(wh_util:to_binary(QueueStart))/binary, "_", (wh_util:rand_hex_binary(4))/binary>>
+    end.
+
+-spec maybe_bindings(wh_proplist()) -> wh_proplist().
+maybe_bindings(Args) ->
+    case props:get_value('amqp_bindings', Args) of
+        'undefined' -> ?BINDINGS;
+        Bindings -> Bindings
+    end.
+
+-spec maybe_exchanges(wh_proplist()) -> wh_proplist().
+maybe_exchanges(Args) ->
+    case props:get_value('amqp_exchanges', Args) of
+        'undefined' -> [];
+        Exchanges -> [{'declare_exchanges', Exchanges}]
     end.
 
 -spec default_timeout() -> 2000.
@@ -164,7 +186,7 @@ call(Req, PubFun, VFun, Timeout, Worker) ->
 -spec next_worker() -> pid() | {'error', any()}.
 next_worker() ->
     next_worker(wh_amqp_sup:pool_name()).
-    
+
 -spec next_worker(atom()) -> pid() | {'error', any()}.
 next_worker(Pool) ->
     try poolboy:checkout(Pool, 'false', default_timeout()) of
@@ -303,9 +325,12 @@ cast(Req, PubFun) ->
 cast(Req, PubFun, Pool) when is_atom(Pool) ->
     case next_worker(Pool) of
         {'error', _}=E -> E;
-        Worker -> cast(Req, PubFun, Worker)
+        Worker ->
+            Resp = cast(Req, PubFun, Worker),
+            checkin_worker(Worker, Pool),
+            Resp
     end;
-cast(Req, PubFun, Worker) ->
+cast(Req, PubFun, Worker) when is_pid(Worker) ->
     Prop = maybe_convert_to_proplist(Req),
     try gen_listener:call(Worker, {'publish', Prop, PubFun}) of
         Reply -> Reply
@@ -313,8 +338,6 @@ cast(Req, PubFun, Worker) ->
         _E:R ->
             lager:debug("request failed: ~s: ~p", [_E, R]),
             {'error', R}
-    after
-        checkin_worker(Worker)
     end.
 
 -spec collect_until_timeout() -> collect_until_fun().
@@ -351,17 +374,26 @@ handle_resp(JObj, Props) ->
 
 -spec send_request(ne_binary(), ne_binary(), publish_fun(), wh_proplist()) ->
                           'ok' | {'error', _}.
-send_request(CallID, Self, PublishFun, ReqProp) when is_function(PublishFun, 1) ->
-    put('callid', CallID),
-    Prop = [{<<"Server-ID">>, Self}
-            ,{<<"Call-ID">>, CallID}
-            | ReqProp
-           ],
-    try PublishFun(Prop) of
+send_request(CallId, Self, PublishFun, ReqProps)
+  when is_function(PublishFun, 1) ->
+    put('callid', CallId),
+    Props = props:insert_values(
+              [{<<"Server-ID">>, Self}
+              ,{<<"Call-ID">>, CallId}
+              ]
+              ,props:filter(fun request_proplist_filter/1, ReqProps)
+             ),
+    try PublishFun(Props) of
         'ok' -> 'ok'
     catch
         _:E -> {'error', E}
     end.
+
+-spec request_proplist_filter({wh_proplist_key(), wh_proplist_value()}) -> boolean().
+request_proplist_filter({<<"Server-ID">>, Value}) ->
+    not wh_util:is_empty(Value);
+request_proplist_filter({_, 'undefined'}) -> 'false';
+request_proplist_filter(_) -> 'true'.
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -495,6 +527,7 @@ handle_call({'publish', ReqProp, PublishFun}, _From, State) ->
                 ST = erlang:get_stacktrace(),
                 lager:debug("function clause error when publishing:"),
                 wh_util:log_stacktrace(ST),
+                lager:debug("pub fun: ~p", [PublishFun]),
                 {'error', 'function_clause'};
             _E:R ->
                 lager:debug("failed to publish request: ~s:~p", [_E, R]),
@@ -640,16 +673,16 @@ handle_info({'timeout', ReqRef, 'req_timeout'}, #state{current_msg_id= _MsgID
                                                        ,req_timeout_ref=ReqRef
                                                        ,callid=CallID
                                                        ,responses='undefined'
-                                                       ,client_from=From
+                                                       ,client_from={_Pid, _}=From
                                                        ,defer_response=ReservedJObj
                                                       }=State) ->
     put('callid', CallID),
     case wh_util:is_empty(ReservedJObj) of
         'true' ->
-            lager:debug("request timeout exceeded for msg id: ~s", [_MsgID]),
+            lager:debug("request timeout exceeded for msg id: ~s and client: ~p", [_MsgID, _Pid]),
             gen_server:reply(From, {'error', 'timeout'});
         'false' ->
-            lager:debug("only received defered response for msg id: ~s", [_MsgID]),
+            lager:debug("only received defered response for msg id: ~s and client: ~p", [_MsgID, _Pid]),
             gen_server:reply(From, {'ok', ReservedJObj})
     end,
     {'noreply', reset(State), 'hibernate'};

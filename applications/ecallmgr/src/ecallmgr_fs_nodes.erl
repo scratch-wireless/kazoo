@@ -113,7 +113,8 @@ flush() -> do_flush(<<>>).
 flush(User, Realm) ->
     Args = <<"id "
              ,User/binary, " "
-             ,Realm/binary>>,
+             ,Realm/binary
+           >>,
     do_flush(Args).
 
 -spec do_flush(binary()) -> 'ok'.

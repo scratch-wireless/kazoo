@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%%% @copyright (C) 2011-2014, 2600Hz INC
+%%% @copyright (C) 2011-2015, 2600Hz INC
 %%% @doc
 %%% API resource
 %%% @end
@@ -354,12 +354,13 @@ options(Req0, Context) ->
                                     {content_type_callbacks(), cowboy_req:req(), cb_context:context()}.
 content_types_provided(Req, Context0) ->
     lager:debug("run: content_types_provided"),
-    Context1 =
-        lists:foldr(fun({Mod, Params}, ContextAcc) ->
-                            Event = api_util:create_event_name(Context0, <<"content_types_provided.", Mod/binary>>),
-                            Payload = [ContextAcc | Params],
-                            crossbar_bindings:fold(Event, Payload)
-                    end, Context0, cb_context:req_nouns(Context0)),
+
+    [{Mod, Params}|_] = cb_context:req_nouns(Context0),
+    Event = api_util:create_event_name(Context0, <<"content_types_provided.", Mod/binary>>),
+    Payload = [Context0 | Params],
+
+    Context1 = crossbar_bindings:fold(Event, Payload),
+
     content_types_provided(Req, Context1, cb_context:content_types_provided(Context1)).
 
 content_types_provided(Req, Context, []) ->
@@ -382,12 +383,11 @@ content_types_provided(Req, Context, CTPs) ->
                                     {content_type_callbacks(), cowboy_req:req(), cb_context:context()}.
 content_types_accepted(Req0, Context0) ->
     lager:debug("run: content_types_accepted"),
-    Context1 =
-        lists:foldr(fun({Mod, Params}, ContextAcc) ->
-                            Event = api_util:create_event_name(Context0, <<"content_types_accepted.", Mod/binary>>),
-                            Payload = [ContextAcc | Params],
-                            crossbar_bindings:fold(Event, Payload)
-                    end, Context0, cb_context:req_nouns(Context0)),
+
+    [{Mod, Params} | _] = cb_context:req_nouns(Context0),
+    Event = api_util:create_event_name(Context0, <<"content_types_accepted.", Mod/binary>>),
+    Payload = [Context0 | Params],
+    Context1 = crossbar_bindings:fold(Event, Payload),
 
     case cowboy_req:parse_header(<<"content-type">>, Req0) of
         {'undefined', <<>>, Req1} -> default_content_types_accepted(Req1, Context1);
@@ -431,12 +431,11 @@ content_types_accepted(CT, Req, Context) ->
                                 {ne_binaries(), cowboy_req:req(), cb_context:context()}.
 languages_provided(Req0, Context0) ->
     lager:debug("run: languages_provided"),
-    Context1 =
-        lists:foldr(fun({Mod, Params}, ContextAcc) ->
-                            Event = api_util:create_event_name(Context0, <<"languages_provided.", Mod/binary>>),
-                            Payload = [ContextAcc | Params],
-                            crossbar_bindings:fold(Event, Payload)
-                    end, Context0, cb_context:req_nouns(Context0)),
+
+    [{Mod, Params} | _] = cb_context:req_nouns(Context0),
+    Event = api_util:create_event_name(Context0, <<"languages_provided.", Mod/binary>>),
+    Payload = [Context0 | Params],
+    Context1 = crossbar_bindings:fold(Event, Payload),
 
     case cowboy_req:parse_header(<<"accept-language">>, Req0) of
         {'ok', 'undefined', Req1} ->
@@ -453,13 +452,11 @@ charsets_provided(_Req, _Context) ->
                                 {ne_binaries(), cowboy_req:req(), cb_context:context()}.
 encodings_provided(Req0, Context0) ->
     lager:debug("run: encodings_provided"),
-    {Req1, Context1} =
-        lists:foldr(fun({Mod, Params}, {ReqAcc, ContextAcc}) ->
-                            Event = api_util:create_event_name(Context0, <<"encodings_provided.", Mod/binary>>),
-                            Payload = {ReqAcc, ContextAcc, Params},
-                            {ReqAcc1, ContextAcc1, _} = crossbar_bindings:fold(Event, Payload),
-                            {ReqAcc1, ContextAcc1}
-                    end, {Req0, Context0}, cb_context:req_nouns(Context0)),
+
+    [{Mod, Params} | _] = cb_context:req_nouns(Context0),
+    Event = api_util:create_event_name(Context0, <<"encodings_provided.", Mod/binary>>),
+    Payload = {Req0, Context0, Params},
+    {Req1, Context1, _} = crossbar_bindings:fold(Event, Payload),
     {cb_context:encodings_provided(Context1), Req1, Context1}.
 
 -spec resource_exists(cowboy_req:req(), cb_context:context()) ->
@@ -706,11 +703,11 @@ to_csv(Req, Context) ->
     [{Mod, _Params}|_] = cb_context:req_nouns(Context),
     Verb = cb_context:req_verb(Context),
     Event = api_util:create_event_name(Context, [<<"to_csv">>
-                                        ,wh_util:to_lower_binary(Verb)
-                                        ,Mod
-                                       ]),
+                                                 ,wh_util:to_lower_binary(Verb)
+                                                 ,Mod
+                                                ]),
     {Req1, Context1} = crossbar_bindings:fold(Event, {Req, Context}),
-     case cb_context:fetch(Context1, 'is_chunked') of
+    case cb_context:fetch(Context1, 'is_chunked') of
         'true' -> {'halt', Req1, Context1};
         _ ->
             RespBody = maybe_flatten_jobj(Context1),
@@ -818,7 +815,7 @@ correct_jobj(JObj) ->
     L = lists:map(fun(X) -> correct_proplist(X) end, Prop),
     wh_json:from_list(L).
 
-correct_proplist({K}) -> {K, <<"">>};
+correct_proplist({K}) -> {K, <<>>};
 correct_proplist(T) -> T.
 
 -spec multiple_choices(cowboy_req:req(), cb_context:context()) ->
@@ -834,7 +831,7 @@ generate_etag(Req0, Context0) ->
     case cb_context:resp_etag(Context1) of
         'automatic' ->
             {Content, _} = api_util:create_resp_content(Req1, Context1),
-            Tag = wh_util:to_hex_binary(crypto:hash(md5, Content)),
+            Tag = wh_util:to_hex_binary(crypto:hash('md5', Content)),
             {list_to_binary([$", Tag, $"]), Req1, cb_context:set_resp_etag(Context1, Tag)};
         'undefined' ->
             {'undefined', Req1, cb_context:set_resp_etag(Context1, 'undefined')};

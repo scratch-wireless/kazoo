@@ -29,10 +29,15 @@
                      ,{{'teletype_voicemail_full', 'handle_full_voicemail'}
                        ,[{<<"notification">>, <<"voicemail_full">>}]
                       }
+                     ,{{'teletype_fax_inbound_to_email', 'handle_fax_inbound'}
+                       ,[{<<"notification">>, <<"inbound_fax">>}]
+                      }
+                     ,{'teletype_template_skel'
+                       ,[{<<"notification">>, <<"skel">>}]
+                      }
                     ]).
 %% -define(RESPONDERS, []}
 
-%%                      ,{'teletype_fax_inbound_to_email', [{<<"notification">>, <<"inbound_fax">>}]}
 %%                      ,{'teletype_fax_outbound_to_email', [{<<"notification">>, <<"outbound_fax">>}]}
 %%                      ,{'teletype_fax_inbound_error_to_email', [{<<"notification">>, <<"inbound_fax_error">>}]}
 %%                      ,{'teletype_fax_outbound_error_to_email', [{<<"notification">>, <<"outbound_fax_error">>}]}
@@ -47,12 +52,13 @@
 %%                      ,{'teletype_transaction', [{<<"notification">>, <<"transaction">>}]}
 %%                      ,{'teletype_system_alert', [{<<"notification">>, <<"system_alert">>}]}
 %%                      ,{'teletype_topup', [{<<"notification">>, <<"topup">>}]}
-%%                      ,{'teletype_template_skel', [{<<"notification">>, <<"skel">>}]}
+
 %%                     ]).
 
 -define(RESTRICT_TO, ['new_voicemail'
                       ,'voicemail_full'
-                      %% ,'inbound_fax'
+                      ,'inbound_fax'
+
                       %% ,'inbound_fax_error'
                       %% ,'outbound_fax'
                       %% ,'outbound_fax_error'
@@ -65,7 +71,7 @@
                       %% ,'low_balance'
                       %% ,'transaction'
                       %% ,'system_alerts'
-                      %% ,'skel'
+                      ,'skel'
                      ]).
 
 -define(BINDINGS, [{'notifications', [{'restrict_to', ?RESTRICT_TO}]}
@@ -157,6 +163,7 @@ handle_cast(_Msg, State) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_info(_Info, State) ->
+    lager:debug("unhandled message: ~p", [_Info]),
     {'noreply', State}.
 
 %%--------------------------------------------------------------------
@@ -167,8 +174,13 @@ handle_info(_Info, State) ->
 %% @spec handle_event(JObj, State) -> {reply, Options}
 %% @end
 %%--------------------------------------------------------------------
-handle_event(_JObj, _State) ->
-    {'reply', []}.
+handle_event(JObj, _State) ->
+    case should_handle(JObj) of
+        'false' -> 'ignore';
+        'true' ->
+            lager:debug("handling notification for ~p", [wh_util:get_event_type(JObj)]),
+            {'reply', []}
+    end.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -198,3 +210,27 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+-spec should_handle(wh_json:object()) -> boolean().
+should_handle(JObj) ->
+    case wh_json:get_first_defined([<<"Account-ID">>, <<"Account-DB">>], JObj) of
+        'undefined' -> should_handle_system();
+        Account -> should_handle_account(Account)
+    end.
+
+-spec should_handle_system() -> boolean().
+should_handle_system() ->
+    whapps_config:get_value(?NOTIFY_CONFIG_CAT
+                            ,<<"notification_app">>
+                            ,?APP_NAME
+                           ) =:= ?APP_NAME.
+
+-spec should_handle_account(ne_binary()) -> boolean().
+should_handle_account(Account) ->
+    AccountId = wh_util:format_account_id(Account, 'raw'),
+    AccountDb = wh_util:format_account_id(Account, 'encoded'),
+
+    case couch_mgr:open_cache_doc(AccountDb, AccountId) of
+        {'ok', AccountJObj} ->
+            kz_account:notification_preference(AccountJObj) =/= 'undefined';
+        {'error', _E} -> 'true'
+    end.

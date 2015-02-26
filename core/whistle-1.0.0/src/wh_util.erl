@@ -12,6 +12,7 @@
 -export([log_stacktrace/0, log_stacktrace/1
          ,format_account_id/1, format_account_id/2, format_account_id/3
          ,format_account_mod_id/1, format_account_mod_id/2, format_account_mod_id/3
+         ,format_account_db/1
          ,normalize_account_name/1
         ]).
 -export([is_in_account_hierarchy/2, is_in_account_hierarchy/3]).
@@ -50,7 +51,9 @@
         ]).
 
 
--export([clean_binary/1, clean_binary/2]).
+-export([clean_binary/1, clean_binary/2
+         ,remove_white_spaces/1
+        ]).
 
 -export([uri_encode/1
          ,uri_decode/1
@@ -79,7 +82,7 @@
          ,now_s/1, now_ms/1, now_us/1
         ]).
 
--export([put_callid/1]).
+-export([put_callid/1, get_callid/0]).
 -export([get_event_type/1]).
 -export([get_xml_value/2]).
 
@@ -93,6 +96,8 @@
 -export([format_date/0, format_date/1]).
 -export([format_time/0, format_time/1]).
 -export([format_datetime/0, format_datetime/1]).
+
+-export([node_name/0, node_hostname/0]).
 
 -include_lib("kernel/include/inet.hrl").
 
@@ -263,6 +268,9 @@ format_account_mod_id(AccountId, Timestamp) when is_integer(Timestamp) ->
 format_account_mod_id(AccountId, Year, Month) ->
     format_account_id(AccountId, Year, Month).
 
+-spec format_account_db(ne_binaries() | api_binary() | wh_json:object()) -> api_binary().
+format_account_db(AccountId) -> format_account_id(AccountId, 'encoded').
+
 -spec pad_month(wh_month() | ne_binary()) -> ne_binary().
 pad_month(<<_/binary>> = Month) ->
     pad_month(to_integer(Month));
@@ -375,8 +383,8 @@ is_account_expired(Account) ->
             Now = wh_util:current_tstamp(),
             Trial = wh_json:get_integer_value(<<"pvt_trial_expires">>, Doc, Now+1),
             Trial < Now;
-        {'error', R} ->
-            lager:debug("failed to check if expired token auth, ~p", [R]),
+        {'error', _R} ->
+            lager:debug("failed to check if expired token auth, ~p", [_R]),
             'false'
     end.
 
@@ -398,8 +406,8 @@ get_account_realm('undefined', _) -> 'undefined';
 get_account_realm(Db, AccountId) ->
     case couch_mgr:open_cache_doc(Db, AccountId) of
         {'ok', JObj} -> wh_json:get_ne_value(<<"realm">>, JObj);
-        {'error', R} ->
-            lager:debug("error while looking up account realm in ~s: ~p", [AccountId, R]),
+        {'error', _R} ->
+            lager:debug("error while looking up account realm in ~s: ~p", [AccountId, _R]),
             'undefined'
     end.
 
@@ -501,6 +509,9 @@ put_callid(Atom) when is_atom(Atom) -> erlang:put('callid', Atom);
 put_callid(Prop) when is_list(Prop) -> erlang:put('callid', callid(Prop));
 put_callid(JObj) -> erlang:put('callid', callid(JObj)).
 
+-spec get_callid() -> ne_binary().
+get_callid() -> erlang:get('callid').
+
 callid(Prop) when is_list(Prop) ->
     props:get_first_defined([<<"Call-ID">>, <<"Msg-ID">>], Prop, ?LOG_SYSTEM_ID);
 callid(JObj) ->
@@ -529,7 +540,7 @@ get_event_type(JObj) ->
 %% Generic helper to get the text value of a XML path
 %% @end
 %%--------------------------------------------------------------------
--spec get_xml_value(wh_deeplist(), xml_el()) -> api_binary().
+-spec get_xml_value(wh_deeplist(), xml_el() | string()) -> api_binary().
 get_xml_value(Paths, Xml) ->
     Path = lists:flatten(Paths),
     try xmerl_xpath:string(Path, Xml) of
@@ -543,7 +554,7 @@ get_xml_value(Paths, Xml) ->
             wh_util:to_binary(Value);
         [#xmlAttribute{}|_]=Values ->
             iolist_to_binary([wh_util:to_binary(Value)
-                              || #xmlText{value=Value} <- Values
+                              || #xmlAttribute{value=Value} <- Values
                              ]);
         _Else -> 'undefined'
     catch
@@ -864,7 +875,7 @@ to_upper_char(C) when is_integer(C), 16#F8 =< C, C =< 16#FE -> C - 32;
 to_upper_char(C) -> C.
 
 -spec strip_binary(binary()) -> binary().
--spec strip_binary(binary(), 'both' | 'left' | 'right') -> binary().
+-spec strip_binary(binary(), 'both' | 'left' | 'right' | char() | list(char())) -> binary().
 -spec strip_left_binary(binary(), char()) -> binary().
 -spec strip_right_binary(binary(), char()) -> binary().
 strip_binary(B) -> strip_binary(B, 'both').
@@ -872,7 +883,13 @@ strip_binary(B) -> strip_binary(B, 'both').
 strip_binary(B, 'left') -> strip_left_binary(B, $\s);
 strip_binary(B, 'right') -> strip_right_binary(B, $\s);
 strip_binary(B, 'both') -> strip_right_binary(strip_left_binary(B, $\s), $\s);
-strip_binary(B, C) when is_integer(C) -> strip_right_binary(strip_left_binary(B, C), C).
+strip_binary(B, C) when is_integer(C) -> strip_right_binary(strip_left_binary(B, C), C);
+strip_binary(B, Cs) when is_list(Cs) ->
+    lists:foldl(fun(C, Acc) -> strip_binary(Acc, C) end
+                ,B
+                ,Cs
+               ).
+
 
 strip_left_binary(<<C, B/binary>>, C) -> strip_left_binary(B, C);
 strip_left_binary(B, _) -> B.
@@ -908,9 +925,12 @@ clean_binary(Bin, Opts) ->
 remove_white_spaces(Bin, Opts) ->
     case props:get_value(<<"remove_white_spaces">>, Opts, 'true') of
         'false' -> Bin;
-        'true' ->
-            << <<X>> || <<X>> <= Bin, X =/= $ >> %"$ " is 32
+        'true' -> remove_white_spaces(Bin)
     end.
+
+-spec remove_white_spaces(binary()) -> binary().
+remove_white_spaces(Bin) ->
+    << <<X>> || <<X>> <= Bin, X =/= $ >>. %"$ " is 32
 
 -spec binary_md5(text()) -> ne_binary().
 binary_md5(Text) -> to_hex_binary(erlang:md5(to_binary(Text))).
@@ -1081,6 +1101,15 @@ format_datetime() ->
 
 format_datetime(Timestamp) ->
     list_to_binary([format_date(Timestamp), " ", format_time(Timestamp)]).
+
+-spec node_name() -> binary().
+-spec node_hostname() -> binary().
+node_name() ->
+    [Name, _Host] = binary:split(to_binary(node()), <<"@">>),
+    Name.
+node_hostname() ->
+    [_Name, Host] = binary:split(to_binary(node()), <<"@">>),
+    Host.
 
 -ifdef(TEST).
 

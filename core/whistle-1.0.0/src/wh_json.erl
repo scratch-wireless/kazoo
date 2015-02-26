@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%%% @copyright (C) 2011-2014, 2600Hz
+%%% @copyright (C) 2011-2015, 2600Hz
 %%% @doc
 %%% proplists-like interface to json objects
 %%% @end
@@ -43,7 +43,10 @@
          ,get_values/1, get_values/2
         ]).
 -export([get_keys/1, get_keys/2]).
--export([set_value/3, set_values/2, new/0]).
+-export([set_value/3, set_values/2
+         ,insert_value/3
+         ,new/0
+        ]).
 -export([delete_key/2, delete_key/3, delete_keys/2]).
 -export([merge_recursive/1
          ,merge_recursive/2
@@ -96,11 +99,11 @@ new() -> ?JSON_WRAPPER([]).
 -spec encode(json_term()) -> text().
 encode(JObj) -> ejson:encode(JObj).
 
--spec decode(iolist() | ne_binary()) -> object().
--spec decode(iolist() | ne_binary(), ne_binary()) -> object().
+-spec decode(iolist() | ne_binary()) -> json_term().
+-spec decode(iolist() | ne_binary(), ne_binary()) -> json_term().
 
 decode(Thing) when is_list(Thing) orelse is_binary(Thing) ->
-    decode(Thing, ?DEFAULT_CONTENT_TYPE).
+    decode(Thing, <<"application/json">>).
 
 decode(JSON, <<"application/json">>) ->
     try ejson:decode(JSON) of
@@ -587,6 +590,13 @@ get_values(Key, JObj) ->
 -spec set_values(json_proplist(), object()) -> object().
 set_values(KVs, JObj) when is_list(KVs) ->
     lists:foldr(fun({K,V}, JObj0) -> set_value(K, V, JObj0) end, JObj, KVs).
+
+-spec insert_value(key(), json_term(), object()) -> object().
+insert_value(Key, Value, JObj) ->
+    case get_value(Key, JObj) of
+        'undefined' -> set_value(Key, Value, JObj);
+        _V -> JObj
+    end.
 
 -spec set_value(key(), json_term(), object() | objects()) -> object() | objects().
 set_value(Keys, Value, JObj) when is_list(Keys) -> set_value1(Keys, Value, JObj);
@@ -1260,5 +1270,12 @@ find_value_test() ->
     ?assertEqual(<<"{\"k1\":\"v1\"}">>, encode(find_value(<<"k1">>, <<"v1">>, JObjs))),
     ?assertEqual(<<"{\"k1\":\"v2\"}">>, encode(find_value(<<"k1">>, <<"v2">>, JObjs))),
     ?assertEqual('undefined', find_value(<<"k1">>, <<"v3">>, JObjs)).
+
+insert_value_test() ->
+    JObj = decode(<<"{\"k1\":\"v1\",\"k2\":\"v2\"}">>),
+    NonInsert = insert_value(<<"k1">>, <<"v3">>, JObj),
+    Insert = insert_value(<<"k3">>, <<"v3">>, JObj),
+    ?assertEqual(<<"v1">>, get_value(<<"k1">>, NonInsert)),
+    ?assertEqual(<<"v3">>, get_value(<<"k3">>, Insert)).
 
 -endif.

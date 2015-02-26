@@ -73,6 +73,7 @@
 -define(QUEUE_OPTIONS, []).
 -define(CONSUME_OPTIONS, []).
 
+-define(CALL_PARK_FEATURE, "*3").
 -record(state, {max_channel_cleanup_ref :: reference()}).
 -type state() :: #state{}.
 
@@ -261,11 +262,22 @@ handle_query_channels(JObj, _Props) ->
     Fields = wh_json:get_value(<<"Fields">>, JObj, []),
     CallId = wh_json:get_value(<<"Call-ID">>, JObj),
 
-    Resp = [{<<"Channels">>, query_channels(Fields, CallId)}
-            ,{<<"Msg-ID">>, wh_json:get_value(<<"Msg-ID">>, JObj)}
-            | wh_api:default_headers(?APP_NAME, ?APP_VERSION)
-           ],
-    wapi_call:publish_query_channels_resp(wh_json:get_value(<<"Server-ID">>, JObj), Resp).
+    maybe_send_query_channels_resp(JObj, query_channels(Fields, CallId)).
+
+-spec maybe_send_query_channels_resp(wh_json:object(), wh_json:object()) -> 'ok'.
+maybe_send_query_channels_resp(JObj, Channels) ->
+    case wh_util:is_empty(Channels) and
+        wh_json:is_true(<<"Active-Only">>, JObj, 'false')
+    of
+        'true' ->
+            lager:debug("not sending query_channels resp due to active-only=true");
+        'false' ->
+            Resp = [{<<"Channels">>, Channels}
+                   ,{<<"Msg-ID">>, wh_json:get_value(<<"Msg-ID">>, JObj)}
+                    | wh_api:default_headers(?APP_NAME, ?APP_VERSION)
+                   ],
+            wapi_call:publish_query_channels_resp(wh_json:get_value(<<"Server-ID">>, JObj), Resp)
+    end.
 
 -spec handle_channel_status(wh_json:object(), wh_proplist()) -> 'ok'.
 handle_channel_status(JObj, _Props) ->
@@ -551,6 +563,18 @@ find_by_user_realm('undefined', Realm) ->
         Channels ->
             [{Channel#channel.uuid, ecallmgr_fs_channel:to_json(Channel)}
               || Channel <- Channels
+            ]
+    end;
+find_by_user_realm(<<?CALL_PARK_FEATURE, _/binary>>=Username, Realm) ->
+    Pattern = #channel{destination=wh_util:to_lower_binary(Username)
+                      ,realm=wh_util:to_lower_binary(Realm)
+                      ,other_leg='undefined'
+                      ,_='_'},
+    case ets:match_object(?CHANNELS_TBL, Pattern) of
+        [] -> [];
+        Channels ->
+            [{Channel#channel.uuid, ecallmgr_fs_channel:to_json(Channel)}
+                || Channel <- Channels
             ]
     end;
 find_by_user_realm(Usernames, Realm) when is_list(Usernames) ->

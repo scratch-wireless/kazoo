@@ -11,11 +11,13 @@
 -export([name/1, set_name/2
          ,parent_account_id/1
          ,tree/1
+         ,notification_preference/1, set_notification_preference/2
         ]).
 
 -define(ID, <<"_id">>).
 -define(NAME, <<"name">>).
 -define(TREE, <<"pvt_tree">>).
+-define(NOTIFY_PREF, <<"pvt_notification_preference">>).
 
 -include("kz_documents.hrl").
 
@@ -34,9 +36,17 @@ parent_account_id(JObj) ->
         Ancestors -> lists:last(Ancestors)
     end.
 
--spec tree(wh_json:object()) -> api_binary().
+-spec tree(wh_json:object()) -> ne_binaries().
 tree(JObj) ->
-    wh_json:get_value(?TREE, JObj).
+    wh_json:get_value(?TREE, JObj, []).
+
+-spec notification_preference(wh_json:object()) -> api_binary().
+notification_preference(JObj) ->
+    wh_json:get_value(?NOTIFY_PREF, JObj).
+
+-spec set_notification_preference(wh_json:object(), ne_binary()) -> wh_json:object().
+set_notification_preference(JObj, Pref) ->
+    wh_json:set_value(?NOTIFY_PREF, Pref, JObj).
 
 -ifdef(TEST).
 

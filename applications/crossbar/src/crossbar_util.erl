@@ -52,8 +52,8 @@
          ,change_pvt_enabled/2
         ]).
 -export([get_path/2]).
--export([get_user_lang/2
-         ,get_account_lang/1
+-export([get_language/1
+         ,get_language/2
         ]).
 -export([get_user_timezone/2
          ,get_account_timezone/1
@@ -630,56 +630,100 @@ populate_resp(JObj, AccountId, UserId) ->
       ,JObj
      ).
 
--spec load_apps(ne_binary(), api_binary()) -> api_object().
-load_apps(_, 'undefined') -> 'undefined';
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% @end
+%%--------------------------------------------------------------------
+-spec load_apps(ne_binary(), ne_binary()) -> wh_json:objects().
 load_apps(AccountId, UserId) ->
-    MasterAccountDb = get_master_account_db(),
+    Apps = cb_apps_util:allowed_apps(AccountId),
+    FilteredApps = filter_apps(Apps, AccountId, UserId),
+    format_apps(AccountId, UserId, FilteredApps).
+
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% @end
+%%--------------------------------------------------------------------
+-spec filter_apps(wh_json:objects(), ne_binary(), ne_binary()) ->
+                         wh_json:objects().
+-spec filter_apps(wh_json:objects(), wh_json:object(), ne_binary(), wh_json:objects()) ->
+                         wh_json:objects().
+filter_apps(Apps, AccountId, UserId) ->
+    AccountDb = wh_util:format_account_id(AccountId, 'encoded'),
+    case couch_mgr:open_doc(AccountDb, AccountId) of
+        {'error', _R} ->
+            lager:error("failed to load account ~s", [AccountId]),
+            Apps;
+        {'ok', AccountDoc} ->
+            filter_apps(Apps, AccountDoc, UserId, [])
+    end.
+
+filter_apps([], _, _, Acc) -> Acc;
+filter_apps([App|Apps], AccountDoc, UserId, Acc) ->
+    case is_authorized(AccountDoc, UserId, App) of
+        'false' ->
+            filter_apps(Apps, AccountDoc, UserId, Acc);
+        'true' ->
+            filter_apps(Apps, AccountDoc, UserId, [App|Acc])
+    end.
+
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% @end
+%%--------------------------------------------------------------------
+-spec is_authorized(wh_json:object(), ne_binary(), wh_json:object()) -> boolean().
+is_authorized(AccountDoc, UserId, App) ->
+    AppId = wh_doc:id(App),
+    JObj = wh_json:get_value([<<"apps">>, AppId], AccountDoc),
+    Allowed = wh_json:get_value(<<"allowed_users">>, JObj, <<"specific">>),
+    Users = wh_json:get_value(<<"users">>, JObj, []),
+    case {Allowed, Users} of
+        {<<"all">>, _} -> 'true';
+        {<<"specific">>, []} -> 'false';
+        {<<"specific">>, Users} when is_list(Users)->
+            lists:member(UserId, Users);
+        {<<"admins">>, _} ->
+            wh_util:is_system_admin(wh_doc:id(AccountDoc));
+        {_A, _U} ->
+            lager:error("unknown data ~p : ~p", [_A, _U]),
+            'false'
+    end.
+
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% @end
+%%--------------------------------------------------------------------
+-spec format_apps(wh_json:objects() | ne_binary(), ne_binary(), wh_json:objects()) -> wh_json:objects().
+format_apps([], _, Acc) -> Acc;
+format_apps(AccountId, UserId, JObjs) when is_binary(AccountId) ->
     Lang = get_language(AccountId, UserId),
-    case couch_mgr:get_all_results(MasterAccountDb, <<"apps_store/crossbar_listing">>) of
-        {'error', _E} ->
-            lager:error("failed to load lookup apps in ~p", [MasterAccountDb]),
-            'undefined';
-        {'ok', JObjs} -> filter_apps(JObjs, Lang)
-    end.
+    format_apps(JObjs, Lang, []);
+format_apps([JObj|JObjs], Lang, Acc) ->
+    FormatedApp = format_app(JObj, Lang),
+    format_apps(JObjs, Lang, [FormatedApp|Acc]).
 
--spec filter_apps(wh_json:objects(), ne_binary()) -> wh_json:objects().
--spec filter_apps(wh_json:objects(), ne_binary(), wh_json:objects()) -> wh_json:objects().
-filter_apps(JObjs, Lang) ->
-    filter_apps(JObjs, Lang, []).
-
-filter_apps([], _, Acc) -> Acc;
-filter_apps([JObj|JObjs], Lang, Acc) ->
-    App = wh_json:get_value(<<"value">>, JObj, wh_json:new()),
-    DefaultLabel = wh_json:get_value([<<"i18n">>, ?DEFAULT_LANGUAGE, <<"label">>], App),
-    FormatedApp =
-        wh_json:from_list(
-            props:filter_undefined(
-                [{<<"id">>, wh_json:get_value(<<"id">>, App)}
-                 ,{<<"name">>, wh_json:get_value(<<"name">>, App)}
-                 ,{<<"api_url">>, wh_json:get_value(<<"api_url">>, App)}
-                 ,{<<"source_url">>, wh_json:get_value(<<"source_url">>, App)}
-                 ,{<<"label">>, wh_json:get_value([<<"i18n">>, Lang, <<"label">>], App, DefaultLabel)}
-                ]
-            )
-        ),
-    filter_apps(JObjs, Lang, [FormatedApp|Acc]).
-
--spec get_language(ne_binary(), api_binary()) -> api_binary().
-get_language(_, 'undefined') -> 'undefined';
-get_language(AccountId, UserId) ->
-    case ?MODULE:get_user_lang(AccountId, UserId) of
-        {'ok', Lang} -> Lang;
-        'error' ->
-            case ?MODULE:get_account_lang(AccountId) of
-                {'ok', Lang} -> Lang;
-                'error' -> ?DEFAULT_LANGUAGE
-            end
-    end.
-
--spec get_master_account_db() -> ne_binary().
-get_master_account_db() ->
-    {'ok', MasterAccountId} = whapps_util:get_master_account_id(),
-    wh_util:format_account_id(MasterAccountId, 'encoded').
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% @end
+%%--------------------------------------------------------------------
+-spec format_app(wh_json:object(), ne_binary()) -> wh_json:object().
+format_app(JObj, Lang) ->
+    DefaultLabel = wh_json:get_value([<<"i18n">>, ?DEFAULT_LANGUAGE, <<"label">>], JObj),
+    wh_json:from_list(
+        props:filter_undefined(
+          [{<<"id">>, wh_json:get_first_defined([<<"id">>, <<"_id">>], JObj)}
+           ,{<<"name">>, wh_json:get_value(<<"name">>, JObj)}
+           ,{<<"api_url">>, wh_json:get_value(<<"api_url">>, JObj)}
+           ,{<<"source_url">>, wh_json:get_value(<<"source_url">>, JObj)}
+           ,{<<"label">>, wh_json:get_value([<<"i18n">>, Lang, <<"label">>], JObj, DefaultLabel)}
+          ]
+         )
+     ).
 
 %%--------------------------------------------------------------------
 %% @public
@@ -704,6 +748,35 @@ change_pvt_enabled(State, AccountId) ->
         _:R ->
             lager:debug("unable to set pvt_enabled to ~s on account ~s: ~p", [State, AccountId, R]),
             {'error', R}
+    end.
+
+%%--------------------------------------------------------------------
+%% @public
+%% Get user/account language
+%% @doc
+%% @end
+%%--------------------------------------------------------------------
+-spec get_language(ne_binary()) -> ne_binary().
+-spec get_language(ne_binary(), api_binary()) -> ne_binary().
+get_language(AccountId) ->
+    case get_account_lang(AccountId) of
+        {'ok', Lang} -> Lang;
+        'error' -> ?DEFAULT_LANGUAGE
+    end.
+
+get_language(AccountId, 'undefined') ->
+    case get_account_lang(AccountId) of
+        {'ok', Lang} -> Lang;
+        'error' -> ?DEFAULT_LANGUAGE
+    end;
+get_language(AccountId, UserId) ->
+    case get_user_lang(AccountId, UserId) of
+        {'ok', Lang} -> Lang;
+        'error' ->
+            case get_account_lang(AccountId) of
+                {'ok', Lang} -> Lang;
+                'error' -> ?DEFAULT_LANGUAGE
+            end
     end.
 
 -spec get_user_lang(ne_binary(), ne_binary()) -> 'error' | {'ok', ne_binary()}.
@@ -780,17 +853,14 @@ get_path(Req, Relative) ->
 
 -spec maybe_remove_attachments(cb_context:context()) -> cb_context:context().
 maybe_remove_attachments(Context) ->
-    JObj = cb_context:doc(Context),
-    maybe_remove_attachments(Context, JObj
-                             ,wh_json:get_value(<<"_attachments">>, JObj)
-                            ).
-maybe_remove_attachments(Context, _JObj, 'undefined') ->
-    Context;
-maybe_remove_attachments(Context, JObj, _Attachments) ->
-    lager:debug("removing old attachments"),
-    crossbar_doc:save(cb_context:set_doc(Context
-                                         ,wh_json:delete_key(<<"_attachments">>, JObj)
-                                        )).
+    case wh_doc:maybe_remove_attachments(cb_context:doc(Context)) of
+        {'false', _} -> Context;
+        {'true', RemovedJObj} ->
+            lager:debug("deleting attachments from doc"),
+            crossbar_doc:save(
+              cb_context:set_doc(Context, RemovedJObj)
+             )
+    end.
 
 -spec create_auth_token(cb_context:context(), atom()) -> cb_context:context().
 create_auth_token(Context, Method) ->
@@ -959,18 +1029,34 @@ load_descendants_count(ViewOptions) ->
 %% @end
 %%--------------------------------------------------------------------
 -spec maybe_update_descendants_count(ne_binary(), integer()) -> 'ok'.
+-spec maybe_update_descendants_count(ne_binary(), integer(), integer()) -> 'ok'.
+-spec maybe_update_descendants_count(ne_binary(), wh_json:object(), integer(), integer()) -> 'ok'.
+-spec maybe_update_descendants_count(ne_binary(), wh_json:object(), integer(), integer(), integer()) -> 'ok'.
+
 maybe_update_descendants_count(AccountId, NewCount) ->
+    maybe_update_descendants_count(AccountId, NewCount, 3).
+
+maybe_update_descendants_count(AccountId, _, Try) when Try =< 0 ->
+    io:format("too many attempts to update descendants count for ~s~n", [AccountId]);
+maybe_update_descendants_count(AccountId, NewCount, Try) ->
     AccountDb = wh_util:format_account_id(AccountId, 'encoded'),
-    case couch_mgr:open_doc(AccountDb, AccountId) of
+    case couch_mgr:open_cache_doc(AccountDb, AccountId) of
         {'error', _E} ->
             io:format("could not load account ~s: ~p~n", [AccountId, _E]);
         {'ok', JObj} ->
-            OldCount = wh_json:get_integer_value(<<"descendants_count">>, JObj),
-            case OldCount =:= NewCount of
-                'true' -> 'ok';
-                'false' ->
-                    update_descendants_count(AccountId, JObj, NewCount)
-            end
+            maybe_update_descendants_count(AccountId, JObj, NewCount, Try)
+    end.
+
+maybe_update_descendants_count(AccountId, JObj, NewCount, Try) ->
+    OldCount = wh_json:get_integer_value(<<"descendants_count">>, JObj),
+    maybe_update_descendants_count(AccountId, JObj, NewCount, OldCount, Try).
+
+maybe_update_descendants_count(_, _, Count, Count, _) -> 'ok';
+maybe_update_descendants_count(AccountId, JObj, NewCount, _, Try) ->
+    case update_descendants_count(AccountId, JObj, NewCount) of
+        'ok' -> 'ok';
+        'error' ->
+            maybe_update_descendants_count(AccountId, NewCount, Try-1)
     end.
 
 %%--------------------------------------------------------------------
@@ -979,19 +1065,17 @@ maybe_update_descendants_count(AccountId, NewCount) ->
 %%
 %% @end
 %%--------------------------------------------------------------------
--spec update_descendants_count(ne_binary(), wh_json:object(), integer()) -> 'ok'.
+-spec update_descendants_count(ne_binary(), wh_json:object(), integer()) -> 'ok' | 'error'.
 update_descendants_count(AccountId, JObj, NewCount) ->
     AccountDb = wh_util:format_account_id(AccountId, 'encoded'),
     Doc = wh_json:set_value(<<"descendants_count">>, NewCount, JObj),
     case couch_mgr:save_doc(AccountDb, Doc) of
-        {'error', _E} ->
-            io:format("failed to update descendant count for ~s: ~p~n", [AccountId, _E]);
+        {'error', _E} -> 'error';
         {'ok', NewDoc} ->
             _ = replicate_account_definition(NewDoc),
             io:format("updated descendant count for ~s~n", [AccountId]),
             'ok'
     end.
-
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").

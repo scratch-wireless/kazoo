@@ -19,49 +19,16 @@
 -define(TEMPLATE_ID, <<"voicemail_full">>).
 
 -define(TEMPLATE_MACROS
-        ,wh_json:from_list([{<<"voicemail.box">>
-                             ,wh_json:from_list([{<<"i18n_label">>, <<"voicemail_box">>}
-                                                 ,{<<"friendly_name">>, <<"Voicemail Box">>}
-                                                 ,{<<"description">>, <<"Which voicemail box was the message left in">>}
-                                                ])
-                            }
-                            ,{<<"voicemail.name">>
-                              ,wh_json:from_list([{<<"i18n_label">>, <<"voicemail_name">>}
-                                                  ,{<<"friendly_name">>, <<"Voicemail Name">>}
-                                                  ,{<<"description">>, <<"Name of the voicemail file">>}
-                                                 ])
-                             }
-                            ,{<<"voicemail.number">>
-                              ,wh_json:from_list([{<<"i18n_label">>, <<"voicemail_number">>}
-                                                  ,{<<"friendly_name">>, <<"Voicemail Number">>}
-                                                  ,{<<"description">>, <<"Number of the voicemail box">>}
-                                                 ])
-                             }
-                            ,{<<"owner.first_name">>
-                              ,wh_json:from_list([{<<"i18n_label">>, <<"first_name">>}
-                                                  ,{<<"friendly_name">>, <<"First Name">>}
-                                                  ,{<<"description">>, <<"First name of the owner of the voicemail box">>}
-                                                 ])
-                             }
-                            ,{<<"owner.last_name">>
-                              ,wh_json:from_list([{<<"i18n_label">>, <<"last_name">>}
-                                                  ,{<<"friendly_name">>, <<"Last Name">>}
-                                                  ,{<<"description">>, <<"Last name of the owner of the voicemail box">>}
-                                                 ])
-                             }
-                            ,{<<"voicemail.max_messages">>
-                              ,wh_json:from_list([{<<"i18n_label">>, <<"max_messages">>}
-                                                  ,{<<"friendly_name">>, <<"Maximum Messages">>}
-                                                  ,{<<"description">>, <<"The maximum number of messages this box can hold">>}
-                                                 ])
-                             }
-                            ,{<<"voicemail.message_count">>
-                              ,wh_json:from_list([{<<"i18n_label">>, <<"message_count">>}
-                                                  ,{<<"friendly_name">>, <<"Message Count">>}
-                                                  ,{<<"description">>, <<"The current number of messages in the voicemail box">>}
-                                                 ])
-                             }
-                           ])
+        ,wh_json:from_list(
+           [?MACRO_VALUE(<<"voicemail.box">>, <<"voicemail_box">>, <<"Voicemail Box">>, <<"Which voicemail box was the message left in">>)
+            ,?MACRO_VALUE(<<"voicemail.name">>, <<"voicemail_name">>, <<"Voicemail Name">>, <<"Name of the voicemail file">>)
+            ,?MACRO_VALUE(<<"voicemail.number">>, <<"voicemail_number">>, <<"Voicemail Number">>, <<"Number of the voicemail box">>)
+            ,?MACRO_VALUE(<<"owner.first_name">>, <<"first_name">>, <<"First Name">>, <<"First name of the owner of the voicemail box">>)
+            ,?MACRO_VALUE(<<"owner.last_name">>, <<"last_name">>, <<"Last Name">>, <<"Last name of the owner of the voicemail box">>)
+            ,?MACRO_VALUE(<<"voicemail.max_messages">>, <<"max_messages">>, <<"Maximum Messages">>, <<"The maximum number of messages this box can hold">>)
+            ,?MACRO_VALUE(<<"voicemail.message_count">>, <<"message_count">>, <<"Message Count">>, <<"The current number of messages in the voicemail box">>)
+            | ?SERVICE_MACROS
+           ])
        ).
 
 -define(TEMPLATE_TEXT, <<"Your voicemail box '{{voicemail.name}}' is full.">>).
@@ -70,10 +37,10 @@
 -define(TEMPLATE_CATEGORY, <<"voicemail">>).
 -define(TEMPLATE_NAME, <<"Full Voicemail Box">>).
 
--define(TEMPLATE_TO, ?CONFIGURED_EMAILS(<<"original">>, [])).
+-define(TEMPLATE_TO, ?CONFIGURED_EMAILS(?EMAIL_ORIGINAL)).
 -define(TEMPLATE_FROM, teletype_util:default_from_address(?MOD_CONFIG_CAT)).
--define(TEMPLATE_CC, ?CONFIGURED_EMAILS(<<"specified">>, [])).
--define(TEMPLATE_BCC, ?CONFIGURED_EMAILS(<<"specificed">>, [])).
+-define(TEMPLATE_CC, ?CONFIGURED_EMAILS(?EMAIL_SPECIFIED, [])).
+-define(TEMPLATE_BCC, ?CONFIGURED_EMAILS(?EMAIL_SPECIFIED, [])).
 -define(TEMPLATE_REPLY_TO, teletype_util:default_reply_to(?MOD_CONFIG_CAT)).
 
 -spec init() -> 'ok'.
@@ -106,22 +73,30 @@ handle_full_voicemail(JObj, _Props) ->
 
     {'ok', AccountJObj} = couch_mgr:open_cache_doc(AccountDb, AccountId),
 
-    case is_notice_enabled_on_account(AccountJObj, JObj) of
+    case teletype_util:should_handle_notification(DataJObj)
+        andalso is_notice_enabled_on_account(AccountJObj, JObj)
+    of
         'false' -> lager:debug("notification not enabled for account ~s", [wh_util:format_account_id(AccountDb, 'raw')]);
         'true' ->
             lager:debug("notification enabled for account ~s (~s)", [AccountId, AccountDb]),
 
             VMBox = get_vm_box(AccountDb, DataJObj),
             User = get_vm_box_owner(AccountDb, VMBox),
+            ReqData =
+                wh_json:set_values(
+                    [{<<"voicemail">>, VMBox}
+                      ,{<<"owner">>, User}
+                      ,{<<"account">>, AccountJObj}
+                      ,{<<"to">>, [wh_json:get_ne_value(<<"email">>, User)]}
+                    ]
+                    ,DataJObj
+                ),
 
-            process_req(
-              wh_json:set_values([{<<"voicemail">>, VMBox}
-                                  ,{<<"owner">>, User}
-                                  ,{<<"account">>, AccountJObj}
-                                 ]
-                                 ,DataJObj
-                                )
-             )
+            case wh_json:is_true(<<"preview">>, DataJObj, 'false') of
+                'false' -> process_req(ReqData);
+                'true' ->
+                    process_req(wh_json:merge_jobjs(DataJObj, ReqData))
+            end
     end.
 
 -spec get_vm_box(ne_binary(), wh_json:object()) -> wh_json:object().
@@ -147,7 +122,6 @@ get_vm_box_owner(AccountDb, VMBox) ->
 -spec process_req(wh_json:object(), wh_proplist()) -> 'ok'.
 process_req(DataJObj) ->
     teletype_util:send_update(DataJObj, <<"pending">>),
-
     %% Load templates
     process_req(DataJObj, teletype_util:fetch_templates(?TEMPLATE_ID, DataJObj)).
 
@@ -177,11 +151,12 @@ process_req(DataJObj, Templates) ->
                 ,Macros
                ),
 
+    Emails = teletype_util:find_addresses(DataJObj, TemplateMetaJObj, ?MOD_CONFIG_CAT),
+
     %% Send email
-    case teletype_util:send_email(?TEMPLATE_ID
-                                  ,wh_json:set_value([<<"to">>, <<"email_addresses">>], to_email_addresses(DataJObj), DataJObj)
-                                  ,ServiceData
+    case teletype_util:send_email(Emails
                                   ,Subject
+                                  ,ServiceData
                                   ,RenderedTemplates
                                  )
     of
@@ -194,40 +169,6 @@ build_template_data(DataJObj) ->
     props:filter_undefined(
       [{<<"voicemail">>, build_voicemail_data(DataJObj)}]
      ).
-
--spec to_email_addresses(wh_json:object()) -> api_binaries().
--spec to_email_addresses(wh_json:object(), api_binaries() | ne_binary()) -> api_binaries().
-to_email_addresses(DataJObj) ->
-    to_email_addresses(DataJObj
-                       ,wh_json:get_first_defined([[<<"to">>, <<"email_addresses">>]
-                                                   ,[<<"owner">>, <<"email">>]
-                                                   ,[<<"owner">>, <<"username">>]
-                                                  ]
-                                                  ,DataJObj
-                                                 )
-                      ).
-
-to_email_addresses(_DataJObj, <<_/binary>> = Email) ->
-    [Email];
-to_email_addresses(_DataJObj, [_|_] = Emails) ->
-    Emails;
-to_email_addresses(DataJObj, _) ->
-    case teletype_util:find_account_rep_email(wh_json:get_value(<<"account">>, DataJObj)) of
-        'undefined' ->
-            lager:debug("failed to find account rep email, using defaults"),
-            default_to_addresses();
-        Emails ->
-            lager:debug("using ~p for To", [Emails]),
-            Emails
-    end.
-
--spec default_to_addresses() -> api_binaries().
-default_to_addresses() ->
-    case whapps_config:get(?MOD_CONFIG_CAT, <<"default_to">>) of
-        'undefined' -> 'undefined';
-        <<_/binary>> = Email -> [Email];
-        [_|_]=Emails -> Emails
-    end.
 
 -spec build_voicemail_data(wh_json:object()) -> wh_proplist().
 build_voicemail_data(DataJObj) ->

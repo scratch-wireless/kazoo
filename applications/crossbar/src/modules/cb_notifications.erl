@@ -30,7 +30,6 @@
 -define(PREVIEW, <<"preview">>).
 
 -define(MACROS, <<"macros">>).
--define(PVT_TYPE, <<"notification">>).
 
 %%%===================================================================
 %%% API
@@ -82,7 +81,9 @@ authorize(Context, AuthAccountId, [{<<"notifications">>, _Id}]) ->
     {'ok', MasterAccountId} = whapps_util:get_master_account_id(),
     cb_context:req_verb(Context) =:= ?HTTP_GET
         orelse AuthAccountId =:= MasterAccountId;
-authorize(_Context, _AuthAccountId, _Nouns) -> 'false'.
+authorize(_Context, _AuthAccountId, _Nouns) ->
+    lager:debug("not authz ~s for ~p", [_AuthAccountId, _Nouns]),
+    'false'.
 
 %%--------------------------------------------------------------------
 %% @public
@@ -129,7 +130,7 @@ resource_exists(_Id, ?PREVIEW) -> 'true'.
 -spec content_types_provided(cb_context:context(), path_token(), http_method()) ->
                                     cb_context:context().
 content_types_provided(Context, Id) ->
-    content_types_provided(Context, db_id(Id), cb_context:req_verb(Context)).
+    content_types_provided(Context, kz_notification:db_id(Id), cb_context:req_verb(Context)).
 
 content_types_provided(Context, Id, ?HTTP_GET) ->
     Context1 = read(Context, Id),
@@ -148,7 +149,7 @@ content_types_provided(Context, _Id, _Verb) ->
 
 -spec maybe_set_content_types(cb_context:context()) -> cb_context:context().
 maybe_set_content_types(Context) ->
-    case wh_json:get_value(<<"_attachments">>, cb_context:doc(Context)) of
+    case wh_doc:attachments(cb_context:doc(Context)) of
         'undefined' -> Context;
         Attachments -> set_content_types(Context, Attachments)
     end.
@@ -209,10 +210,10 @@ validate(Context) ->
     validate_notifications(Context, cb_context:req_verb(Context)).
 
 validate(Context, Id) ->
-    validate_notification(Context, db_id(Id), cb_context:req_verb(Context)).
+    validate_notification(Context, kz_notification:db_id(Id), cb_context:req_verb(Context)).
 
 validate(Context, Id, ?PREVIEW) ->
-    update(Context, db_id(Id)).
+    update_notification(Context, kz_notification:db_id(Id)).
 
 -spec validate_notifications(cb_context:context(), http_method()) ->
                                     cb_context:context().
@@ -255,10 +256,12 @@ put(Context) ->
 -spec post(cb_context:context(), path_token(), path_token()) -> cb_context:context().
 post(Context, Id) ->
     case cb_context:req_files(Context) of
-        [] -> do_post(Context);
+        [] ->
+            lager:debug("handling POST of template meta for ~s", [Id]),
+            do_post(Context);
         [{_FileName, FileJObj}] ->
-            lager:debug("POST is for an attachment on ~s(~s)", [Id, db_id(Id)]),
-            update_template(Context, db_id(Id), FileJObj)
+            lager:debug("POST is for an attachment on ~s(~s)", [Id, kz_notification:db_id(Id)]),
+            update_template(Context, kz_notification:db_id(Id), FileJObj)
     end.
 
 -spec do_post(cb_context:context()) -> cb_context:context().
@@ -270,24 +273,8 @@ do_post(Context) ->
     end.
 
 post(Context, Id, ?PREVIEW) ->
-    Notification = cb_context:doc(Context),
+    Preview = build_preview_payload(Context),
 
-    Preview =
-        props:filter_undefined(
-          [{<<"To">>, wh_json:get_value(<<"to">>, Notification)}
-           ,{<<"From">>, wh_json:get_value(<<"from">>, Notification)}
-           ,{<<"Cc">>, wh_json:get_value(<<"cc">>, Notification)}
-           ,{<<"Bcc">>, wh_json:get_value(<<"bcc">>, Notification)}
-           ,{<<"Reply-To">>, wh_json:get_value(<<"reply_to">>, Notification)}
-           ,{<<"Subject">>, wh_json:get_value(<<"subject">>, Notification)}
-           ,{<<"HTML">>, wh_json:get_value(<<"html">>, Notification)}
-           ,{<<"Text">>, wh_json:get_value(<<"plain">>, Notification)}
-           ,{<<"Account-ID">>, cb_context:account_id(Context)}
-           ,{<<"Account-DB">>, cb_context:account_db(Context)}
-           ,{<<"Msg-ID">>, cb_context:req_id(Context)}
-           ,{<<"Preview">>, 'true'}
-           | wh_api:default_headers(?APP_NAME, ?APP_VERSION)
-          ]),
     {API, _} = lists:foldl(fun preview_fold/2
                            ,{Preview, cb_context:doc(Context)}
                            ,wapi_notifications:headers(Id)
@@ -299,18 +286,38 @@ post(Context, Id, ?PREVIEW) ->
                             )
     of
         {'ok', Resp} ->
-            lager:debug("sent API command to preview ~s: ~p: ~p", [Id, API]),
+            lager:debug("sent API command to preview ~s", [Id]),
             handle_preview_response(Context, Resp);
         {'error', _E} ->
             lager:debug("failed to publish preview for ~s: ~p", [Id, _E]),
             crossbar_util:response('error', <<"Failed to process notification preview">>, Context)
     end.
 
+-spec build_preview_payload(cb_context:context()) -> wh_proplist().
+build_preview_payload(Context) ->
+    Notification = cb_context:doc(Context),
+    props:filter_empty(
+      [{<<"To">>, wh_json:get_value(<<"to">>, Notification)}
+       ,{<<"From">>, wh_json:get_value(<<"from">>, Notification)}
+       ,{<<"Cc">>, wh_json:get_value(<<"cc">>, Notification)}
+       ,{<<"Bcc">>, wh_json:get_value(<<"bcc">>, Notification)}
+       ,{<<"Reply-To">>, wh_json:get_value(<<"reply_to">>, Notification)}
+       ,{<<"Subject">>, wh_json:get_value(<<"subject">>, Notification)}
+       ,{<<"HTML">>, wh_json:get_value(<<"html">>, Notification)}
+       ,{<<"Text">>, wh_json:get_value(<<"plain">>, Notification)}
+       ,{<<"Account-ID">>, cb_context:account_id(Context)}
+       ,{<<"Account-DB">>, cb_context:account_db(Context)}
+       ,{<<"Msg-ID">>, cb_context:req_id(Context)}
+       ,{<<"Call-ID">>, cb_context:req_id(Context)}
+       ,{<<"Preview">>, 'true'}
+       | wh_api:default_headers(?APP_NAME, ?APP_VERSION)
+      ]).
+
 -spec handle_preview_response(cb_context:context(), wh_json:object()) -> cb_context:context().
 handle_preview_response(Context, Resp) ->
     case wh_json:get_value(<<"Status">>, Resp) of
         <<"failed">> ->
-            lager:debug("failed notificaiton preview"),
+            lager:debug("failed notificaiton preview: ~p", [Resp]),
             crossbar_util:response_invalid_data(
               wh_json:normalize(wh_api:remove_defaults(Resp))
               ,Context
@@ -324,7 +331,12 @@ handle_preview_response(Context, Resp) ->
 publish_fun(<<"voicemail">>) ->
     fun wapi_notifications:publish_voicemail/1;
 publish_fun(<<"voicemail_full">>) ->
-    fun wapi_notifications:publish_voicemail_full/1.
+    fun wapi_notifications:publish_voicemail_full/1;
+publish_fun(<<"fax_inbound_to_email">>) ->
+    fun wapi_notifications:publish_fax_inbound/1;
+publish_fun(_Id) ->
+    lager:debug("no wapi_notification:publish_~s/1 defined", [_Id]),
+    fun(_Any) -> 'ok' end.
 
 -spec preview_fold(ne_binary(), {wh_proplist(), wh_json:object()}) ->
                           {wh_proplist(), wh_json:object()}.
@@ -347,21 +359,23 @@ delete(Context, Id) ->
 
 -spec maybe_delete(cb_context:context(), path_token(), media_values()) ->
                           cb_context:context().
-maybe_delete(Context, Id, [{{<<"application">>, <<"json">>, _},_,_}]) ->
+maybe_delete(Context, Id, [?MEDIA_VALUE(<<"application">>, <<"json">>, _, _, _)]) ->
     delete_doc(Context, Id);
-maybe_delete(Context, Id, [{{<<"application">>, <<"x-json">>, _},_,_}]) ->
+maybe_delete(Context, Id, [?MEDIA_VALUE(<<"application">>, <<"x-json">>, _, _, _)]) ->
     delete_doc(Context, Id);
-maybe_delete(Context, Id, [{{Type, SubType, _},_,_}]) ->
+maybe_delete(Context, Id, [?MEDIA_VALUE(Type, SubType, _, _, _)]) ->
     maybe_delete_template(Context, Id, <<Type/binary, "/", SubType/binary>>);
 maybe_delete(Context, Id, []) ->
     lager:debug("no content-type headers, using json"),
     delete_doc(Context, Id).
 
 -spec delete_doc(cb_context:context(), ne_binary()) -> cb_context:context().
-delete_doc(Context, _Id) ->
-    Context1 = crossbar_doc:delete(Context),
+delete_doc(Context, Id) ->
+    Context1 = crossbar_doc:delete(Context, 'permanent'),
     case cb_context:resp_status(Context1) of
-        'success' -> leak_doc_id(Context1);
+        'success' ->
+            couch_mgr:flush_cache_doc(cb_context:account_db(Context), Id),
+            leak_doc_id(Context1);
         _Status -> Context1
     end.
 
@@ -377,10 +391,14 @@ maybe_delete_template(Context, Id, ContentType, TemplateJObj) ->
     case wh_doc:attachment(TemplateJObj, AttachmentName) of
         'undefined' ->
             lager:debug("failed to find attachment ~s", [AttachmentName]),
-            cb_context:add_system_error('bad_identifier', [{'details', ContentType}],  Context);
+            cb_context:add_system_error(
+                'bad_identifier'
+                ,wh_json:from_list([{<<"cause">>, ContentType}])
+                , Context
+            );
         _Attachment ->
             lager:debug("attempting to delete attachment ~s", [AttachmentName]),
-            crossbar_doc:delete_attachment(db_id(Id), AttachmentName, Context)
+            crossbar_doc:delete_attachment(kz_notification:db_id(Id), AttachmentName, Context)
     end.
 
 %%--------------------------------------------------------------------
@@ -400,10 +418,6 @@ create(Context) ->
 %% Load an instance from the database
 %% @end
 %%--------------------------------------------------------------------
-
--type media_value() :: {{ne_binary(), ne_binary(), list()}, non_neg_integer(),list()}.
--type media_values() :: [media_value(),...] | [].
-
 -spec accept_values(cb_context:context()) -> media_values().
 accept_values(Context) ->
     AcceptValue = cb_context:req_header(Context, <<"accept">>),
@@ -418,14 +432,14 @@ media_values(Media) ->
 
 media_values('undefined', 'undefined') ->
     lager:debug("no accept headers, assuming JSON"),
-    [{{<<"application">>, <<"json">>, []},1000,[]}];
+    ?MEDIA_VALUE(<<"application">>, <<"json">>);
 media_values(AcceptValue, 'undefined') ->
-    case cowboy_http:nonempty_list(AcceptValue, fun cowboy_http:media_range/2) of
+    case cb_modules_util:parse_media_type(AcceptValue) of
         {'error', 'badarg'} -> media_values('undefined', 'undefined');
         AcceptValues -> lists:reverse(lists:keysort(2, AcceptValues))
     end;
 media_values(AcceptValue, Tunneled) ->
-    case cowboy_http:nonempty_list(Tunneled, fun cowboy_http:media_range/2) of
+    case cb_modules_util:parse_media_type(Tunneled) of
         {'error', 'badarg'} -> media_values(AcceptValue, 'undefined');
         TunneledValues ->
             lager:debug("using tunneled accept value ~s", [Tunneled]),
@@ -442,14 +456,14 @@ maybe_read(Context, Id) ->
     Acceptable = acceptable_content_types(Context),
     maybe_read(Context, Id, Acceptable, accept_values(Context)).
 
-maybe_read(Context, Id, _Acceptable, [{{<<"application">>, <<"json">>, _},_,_}|_Accepts]) ->
+maybe_read(Context, Id, _Acceptable, [?MEDIA_VALUE(<<"application">>, <<"json">>, _, _, _)|_Accepts]) ->
     read(Context, Id);
-maybe_read(Context, Id, _Acceptable, [{{<<"application">>, <<"x-json">>, _},_,_}|_Accepts]) ->
+maybe_read(Context, Id, _Acceptable, [?MEDIA_VALUE(<<"application">>, <<"x-json">>, _, _, _)|_Accepts]) ->
     read(Context, Id);
-maybe_read(Context, Id, _Acceptable, [{{<<"*">>, <<"*">>, _},_,_}|_Accepts]) ->
+maybe_read(Context, Id, _Acceptable, [?MEDIA_VALUE(<<"*">>, <<"*">>, _, _, _)|_Accepts]) ->
     lager:debug("catch-all accept header, using json"),
     read(Context, Id);
-maybe_read(Context, Id, Acceptable, [{{Type, SubType, _},_,_}|Accepts]) ->
+maybe_read(Context, Id, Acceptable, [?MEDIA_VALUE(Type, SubType, _, _, _)|Accepts]) ->
     case is_acceptable_accept(Acceptable, Type, SubType) of
         'false' ->
             lager:debug("unknown accept header: ~s/~s", [Type, SubType]),
@@ -468,7 +482,7 @@ is_acceptable_accept(Acceptable, Type, SubType) ->
                       T =:= Type andalso S =:= SubType
               end, Acceptable).
 
--type load_from() :: 'system' | 'account'.
+-type load_from() :: 'system' | 'account' | 'system_migrate'.
 
 -spec read(cb_context:context(), ne_binary()) -> cb_context:context().
 -spec read(cb_context:context(), ne_binary(), load_from()) -> cb_context:context().
@@ -478,11 +492,17 @@ read(Context, Id) ->
 read(Context, Id, LoadFrom) ->
     Context1 =
         case cb_context:account_db(Context) of
-            'undefined' when LoadFrom =:= 'system' -> read_system(Context, Id);
-            _AccountDb -> read_account(Context, Id, LoadFrom)
+            'undefined' when LoadFrom =:= 'system'; LoadFrom =:= 'system_migrate' ->
+                lager:debug("no account id, loading ~ from system", [Id]),
+                read_system(Context, Id);
+            _AccountDb ->
+                lager:debug("reading ~s from account first", [Id]),
+                read_account(Context, Id, LoadFrom)
         end,
     case cb_context:resp_status(Context1) of
-        'success' -> read_success(Context1);
+        'success' ->
+            lager:debug("successful read of ~s", [Id]),
+            read_success(Context1);
         _Status -> Context1
     end.
 
@@ -498,13 +518,141 @@ read_account(Context, Id, LoadFrom) ->
           ,cb_context:resp_status(Context1)
          }
     of
-        {404, 'error'} when LoadFrom =:= 'system' -> read_system(Context, Id);
+        {404, 'error'} when LoadFrom =:= 'system'; LoadFrom =:= 'system_migrate' ->
+            lager:debug("~s not found in account, reading from master", [Id]),
+            read_system_for_account(Context, Id, LoadFrom);
         {_Code, 'success'} ->
-            lager:debug("loaded from account"),
+            lager:debug("loaded ~s from account database", [Id]),
             cb_context:set_resp_data(Context1
                                      ,note_account_override(cb_context:resp_data(Context1))
                                     );
-        {_Code, _Status} -> Context1
+        {_Code, _Status} ->
+            lager:debug("failed to load ~s: ~p", [Id, _Code]),
+            Context1
+    end.
+
+-spec read_system_for_account(cb_context:context(), path_token(), load_from()) ->
+                                     cb_context:context().
+read_system_for_account(Context, Id, LoadFrom) ->
+    Context1 = read_system(Context, Id),
+    case cb_context:resp_status(Context1) of
+        'success' when LoadFrom =:= 'system' ->
+            lager:debug("read template ~s from master account", [Id]),
+            revert_context_to_account(Context, Context1);
+        'success' when LoadFrom =:= 'system_migrate' ->
+            lager:debug("read template ~s from master account, now migrating it", [Id]),
+            migrate_template_to_account(revert_context_to_account(Context, Context1), Id);
+        _Status ->
+            lager:debug("failed to read master db for ~s", [Id]),
+            Context1
+    end.
+
+-spec revert_context_to_account(cb_context:context(), cb_context:context()) -> cb_context:context().
+revert_context_to_account(AccountContext, SystemContext) ->
+    cb_context:setters(SystemContext
+                       ,[{fun cb_context:set_account_db/2, cb_context:account_db(AccountContext)}
+                         ,{fun cb_context:set_account_id/2, cb_context:account_id(AccountContext)}
+                        ]).
+
+-spec migrate_template_to_account(cb_context:context(), path_token()) -> cb_context:context().
+migrate_template_to_account(Context, Id) ->
+    lager:debug("saving template ~s from master to account ~s", [Id, cb_context:account_id(Context)]),
+
+    Template = cb_context:fetch(Context, 'db_doc'),
+
+    Context1 =
+        crossbar_doc:ensure_saved(
+          cb_context:set_doc(Context
+                             ,kz_notification:set_base_properties(
+                                wh_doc:public_fields(Template)
+                                ,Id
+                               )
+                            )
+         ),
+    case cb_context:resp_status(Context1) of
+        'success' ->
+            lager:debug("saved template ~s to account ~s", [Id, cb_context:account_db(Context1)]),
+            Context2 = migrate_template_attachments(Context1, Id, wh_doc:attachments(Template)),
+            maybe_note_notification_preference(Context2),
+            Context2;
+        _Status -> Context1
+    end.
+
+-spec maybe_hard_delete(cb_context:context(), ne_binary()) -> 'ok'.
+maybe_hard_delete(Context, Id) ->
+    case couch_mgr:del_doc(cb_context:account_db(Context), Id) of
+        {'ok', _} ->
+            couch_mgr:flush_cache_doc(cb_context:account_db(Context), Id),
+            lager:debug("hard-deleted old version of ~s from ~s", [Id, cb_context:account_db(Context)]);
+        {'error', 'not_found'} ->
+            couch_mgr:flush_cache_doc(cb_context:account_db(Context), Id),
+            lager:debug("~s wasn't found in ~s", [Id, cb_context:account_db(Context)]);
+        {'error', _E} ->
+            lager:debug("error deleting ~s from ~s: ~p", [Id, cb_context:account_db(Context), _E])
+    end.
+
+-spec maybe_note_notification_preference(cb_context:context()) -> 'ok'.
+-spec maybe_note_notification_preference(ne_binary(), wh_json:object()) -> 'ok'.
+maybe_note_notification_preference(Context) ->
+    AccountId = cb_context:account_id(Context),
+    AccountDb = cb_context:account_db(Context),
+    case couch_mgr:open_cache_doc(AccountDb, AccountId) of
+        {'error', _E} -> lager:debug("failed to note preference: ~p", [_E]);
+        {'ok', AccountJObj} ->
+            maybe_note_notification_preference(AccountDb, AccountJObj)
+    end.
+
+maybe_note_notification_preference(AccountDb, AccountJObj) ->
+    case kz_account:notification_preference(AccountJObj) of
+        'undefined' -> note_notification_preference(AccountDb, AccountJObj);
+        _Pref -> lager:debug("account already prefers ~s", [_Pref])
+    end.
+
+-spec note_notification_preference(ne_binary(), wh_json:object()) -> 'ok'.
+note_notification_preference(AccountDb, AccountJObj) ->
+    case couch_mgr:save_doc(AccountDb
+                            ,kz_account:set_notification_preference(AccountJObj
+                                                                    ,kz_notification:pvt_type()
+                                                                   )
+                           )
+    of
+        {'ok', _AccountJObj} ->
+            lager:debug("updated pref for account");
+        {'error', _E} ->
+            lager:debug("failed to note preference: ~p", [_E])
+    end.
+
+-spec migrate_template_attachments(cb_context:context(), ne_binary(), api_object()) ->
+                                          cb_context:context().
+migrate_template_attachments(Context, _Id, 'undefined') ->
+    lager:debug("no attachments to migrate for ~s", [_Id]),
+    Context;
+migrate_template_attachments(Context, Id, Attachments) ->
+    {'ok', MasterAccountDb} = whapps_util:get_master_account_db(),
+    wh_json:foldl(fun(AName, AMeta, C) ->
+                          lager:debug("migrate attachment ~s", [AName]),
+                          migrate_template_attachment(MasterAccountDb, Id, AName, AMeta, C)
+                  end, Context, Attachments).
+
+-spec migrate_template_attachment(ne_binary(), ne_binary(), ne_binary(), wh_json:object(), cb_context:context()) ->
+                                         cb_context:context().
+migrate_template_attachment(MasterAccountDb, Id, AName, AMeta, Context) ->
+    case couch_mgr:fetch_attachment(MasterAccountDb, Id, AName) of
+        {'ok', Bin} ->
+            ContentType = wh_json:get_value(<<"content_type">>, AMeta),
+            lager:debug("saving attachment for ~s(~s): ~s", [Id, AName, ContentType]),
+            crossbar_doc:save_attachment(Id
+                                         ,attachment_name_by_content_type(ContentType)
+                                         ,Bin
+                                         ,Context
+                                         ,[{'headers'
+                                            ,[{'content_type', wh_util:to_list(ContentType)}]
+                                           }
+                                          ]
+                                        );
+        {'error', _E} ->
+            lager:debug("failed to load attachment ~s for ~s: ~p", [AName, Id, _E]),
+            Context
     end.
 
 -spec note_account_override(wh_json:object()) -> wh_json:object().
@@ -531,19 +679,49 @@ maybe_read_template(Context, Id, Accept) ->
 read_template(Context, Id, Accept) ->
     Doc = cb_context:fetch(Context, 'db_doc'),
     AttachmentName = attachment_name_by_media_type(Accept),
-    case wh_json:get_value([<<"_attachments">>, AttachmentName], Doc) of
+    case wh_doc:attachment(Doc, AttachmentName) of
         'undefined' ->
             lager:debug("failed to find attachment ~s in ~s", [AttachmentName, Id]),
             crossbar_util:response_faulty_request(Context);
-        Meta ->
+        _Meta ->
             lager:debug("found attachment ~s in ~s", [AttachmentName, Id]),
 
             cb_context:add_resp_headers(
-              crossbar_doc:load_attachment(Id, AttachmentName, Context)
-              ,[{<<"Content-Disposition">>, [<<"attachment; filename=">>, resp_id(Id), $., cb_modules_util:content_type_to_extension(Accept)]}
-                ,{<<"Content-Type">>, wh_json:get_value(<<"content_type">>, Meta)}
-                ,{<<"Content-Length">>, wh_json:get_value(<<"length">>, Meta)}
+              read_account_attachment(Context, Id, AttachmentName)
+              ,[{<<"Content-Disposition">>, attachment_filename(Id, Accept)}
+                ,{<<"Content-Type">>, wh_doc:attachment_content_type(Doc, AttachmentName)}
+                ,{<<"Content-Length">>, wh_doc:attachment_length(Doc, AttachmentName)}
                ])
+    end.
+
+-spec attachment_filename(ne_binary(), ne_binary()) -> iolist().
+attachment_filename(Id, Accept) ->
+    [<<"attachment; filename=">>
+     ,kz_notification:resp_id(Id)
+     ,$., cb_modules_util:content_type_to_extension(Accept)
+    ].
+
+-spec read_system_attachment(cb_context:context(), ne_binary(), ne_binary()) -> cb_context:context().
+read_system_attachment(Context, DocId, Name) ->
+    {'ok', MasterAccountDb} = whapps_util:get_master_account_db(),
+    crossbar_doc:load_attachment(DocId, Name, cb_context:set_account_db(Context, MasterAccountDb)).
+
+-spec read_account_attachment(cb_context:context(), ne_binary(), ne_binary()) -> cb_context:context().
+read_account_attachment(Context, DocId, Name) ->
+    Context1 = crossbar_doc:load_attachment(DocId, Name, Context),
+    case {cb_context:resp_error_code(Context1)
+          ,cb_context:resp_status(Context1)
+         }
+    of
+        {404, 'error'} ->
+            lager:debug("~s not found in account, reading from master", [DocId]),
+            read_system_attachment(Context, DocId, Name);
+        {_Code, 'success'} ->
+            lager:debug("loaded ~s from account database", [DocId]),
+            Context1;
+        {_Code, _Status} ->
+            lager:debug("failed to load ~s: ~p", [DocId, _Code]),
+            Context1
     end.
 
 %%--------------------------------------------------------------------
@@ -556,14 +734,16 @@ read_template(Context, Id, Accept) ->
 -spec maybe_update(cb_context:context(), ne_binary()) -> cb_context:context().
 maybe_update(Context, Id) ->
     case cb_context:req_files(Context) of
-        [] -> update(Context, Id);
+        [] ->
+            lager:debug("updating template meta for ~s", [Id]),
+            update_notification(Context, Id);
         [{_FileName, FileJObj}] ->
             lager:debug("recv template upload of ~s: ~p", [_FileName, FileJObj]),
-            read(Context, Id)
+            read(Context, Id, 'system_migrate')
     end.
 
--spec update(cb_context:context(), ne_binary()) -> cb_context:context().
-update(Context, Id) ->
+-spec update_notification(cb_context:context(), ne_binary()) -> cb_context:context().
+update_notification(Context, Id) ->
     OnSuccess = fun(C) -> on_successful_validation(Id, C) end,
     cb_context:validate_request_data(<<"notifications">>, Context, OnSuccess).
 
@@ -575,21 +755,13 @@ update_template(Context, Id, FileJObj) ->
     lager:debug("file content type for ~s: ~s", [Id, CT]),
     Opts = [{'headers', [{'content_type', wh_util:to_list(CT)}]}],
 
-    Context1 =
-        case cb_context:account_db(Context) of
-            'undefined' ->
-                {'ok', MasterAccountDb} = whapps_util:get_master_account_db(),
-                cb_context:set_account_db(Context, MasterAccountDb);
-            _AccountDb -> Context
-        end,
-
     AttachmentName = attachment_name_by_content_type(CT),
 
     crossbar_doc:save_attachment(
       Id
       ,AttachmentName
       ,Contents
-      ,Context1
+      ,Context
       ,Opts
      ).
 
@@ -641,7 +813,7 @@ cache_available(Context) ->
     wh_cache:store_local(?CROSSBAR_CACHE
                          ,{?MODULE, 'available'}
                          ,cb_context:doc(Context)
-                         ,[{'origin', [{'db', cb_context:account_db(Context), ?PVT_TYPE}]}]
+                         ,[{'origin', [{'db', cb_context:account_db(Context), kz_notification:pvt_type()}]}]
                         ).
 
 -spec fetch_available() -> {'ok', wh_json:objects()} |
@@ -658,16 +830,27 @@ summary_account(Context) ->
                                ,Context
                                ,fun normalize_available/2
                               ),
+    lager:debug("loaded account's summary"),
     summary_account(Context1, cb_context:doc(Context1)).
 
 summary_account(Context, AccountAvailable) ->
     Context1 = summary_available(Context),
-    Available = cb_context:doc(Context1),
+    Available = filter_available(Context1),
+    lager:debug("loaded system available"),
 
     crossbar_doc:handle_json_success(
       merge_available(AccountAvailable, Available)
       ,Context
      ).
+
+-spec filter_available(cb_context:context()) -> wh_json:objects().
+filter_available(Context) ->
+    [A || A <- cb_context:doc(Context),
+          crossbar_doc:filtered_doc_by_qs(wh_json:from_list([{<<"doc">>, A}])
+                                          ,'true'
+                                          ,Context
+                                         )
+    ].
 
 -spec merge_available(wh_json:objects(), wh_json:objects()) ->
                              wh_json:objects().
@@ -680,8 +863,11 @@ merge_available(AccountAvailable, Available) ->
 -spec merge_fold(wh_json:object(), wh_json:objects()) -> wh_json:objects().
 merge_fold(Overridden, Acc) ->
     Id = wh_json:get_value(<<"id">>, Overridden),
+    lager:debug("noting ~s is overridden in account", [Id]),
     [note_account_override(Overridden)
-     | [JObj || JObj <- Acc, wh_json:get_value(<<"id">>, JObj) =/= Id]
+     | [JObj || JObj <- Acc,
+                wh_json:get_value(<<"id">>, JObj) =/= Id
+       ]
     ].
 
 -spec normalize_available(wh_json:object(), wh_json:objects()) -> wh_json:objects().
@@ -705,13 +891,11 @@ master_notification_doc(DocId) ->
 on_successful_validation('undefined', Context) ->
     ReqTemplate = clean_req_doc(cb_context:doc(Context)),
 
-    DocId = db_id(wh_json:get_value(<<"id">>, ReqTemplate)),
+    DocId = kz_notification:db_id(ReqTemplate),
 
     case master_notification_doc(DocId) of
         {'ok', _JObj} ->
-            Doc = wh_json:set_values([{<<"pvt_type">>, ?PVT_TYPE}
-                                      ,{<<"_id">>, DocId}
-                                     ], ReqTemplate),
+            Doc = kz_notification:set_base_properties(ReqTemplate, DocId),
             cb_context:set_doc(Context, Doc);
         {'error', 'not_found'} ->
             handle_missing_master_notification(Context, DocId, ReqTemplate);
@@ -720,26 +904,33 @@ on_successful_validation('undefined', Context) ->
             crossbar_util:response_db_fatal(Context)
     end;
 on_successful_validation(Id, Context) ->
-    Context1 = crossbar_doc:load_merge(Id, Context),
-    case cb_context:resp_error_code(Context1) of
-        404 ->
-            handle_missing_account_notification(Context1, Id);
-        _Code ->
+    ReqTemplate = clean_req_doc(cb_context:doc(Context)),
+
+    CleanedContext = cb_context:set_doc(Context, ReqTemplate),
+
+    Context1 = crossbar_doc:load_merge(Id, CleanedContext),
+
+    case {cb_context:resp_status(Context1)
+          ,cb_context:resp_error_code(Context1)
+         }
+    of
+        {'error', 404} ->
+            lager:debug("load/merge of ~s failed with a 404", [Id]),
+            handle_missing_account_notification(CleanedContext, Id, cb_context:req_nouns(CleanedContext));
+        {'success', _} -> Context1;
+        {_Status, _Code} ->
+            lager:debug("load/merge of ~s failed with ~p / ~p", [_Status, _Code]),
             Context1
     end.
 
--spec handle_missing_account_notification(cb_context:context(), ne_binary()) -> cb_context:context().
-handle_missing_account_notification(Context, Id) ->
-    ReqTemplate = clean_req_doc(cb_context:doc(Context)),
-
-    case master_notification_doc(Id) of
-        {'ok', JObj} ->
-            lager:debug("account version of ~s missing but master version found, using that", [Id]),
-            crossbar_doc:merge(ReqTemplate, JObj, Context);
-        {'error', _E} ->
-            lager:debug("failed to load master account notification ~s: ~p", [Id, _E]),
-            Context
-    end.
+-spec handle_missing_account_notification(cb_context:context(), ne_binary(), wh_proplist()) -> cb_context:context().
+handle_missing_account_notification(Context, Id, [{<<"notifications">>, [Id ,<<"preview">>]}|_]) ->
+    lager:debug("preview request, ignoring if notification ~s is missing", [Id]),
+    on_successful_validation(Id, Context);
+handle_missing_account_notification(Context, Id, _ReqNouns) ->
+    _ = maybe_hard_delete(Context, Id),
+    _Context = read_system_for_account(Context, Id, 'system_migrate'),
+    on_successful_validation(Id, Context).
 
 -spec handle_missing_master_notification(cb_context:context(), ne_binary(), wh_json:object()) ->
                                                 cb_context:context().
@@ -756,16 +947,14 @@ handle_missing_master_notification(Context, DocId, ReqTemplate) ->
             lager:debug("doc ~s does not exist in the master account, not letting ~s create it"
                         ,[DocId, _AccountId]
                        ),
-            crossbar_util:response_bad_identifier(resp_id(DocId), Context)
+            crossbar_util:response_bad_identifier(kz_notification:resp_id(DocId), Context)
     end.
 
 -spec create_new_notification(cb_context:context(), ne_binary(), wh_json:object(), ne_binary()) ->
                                      cb_context:context().
 create_new_notification(Context, DocId, ReqTemplate, AccountId) ->
     lager:debug("this will create a new template in the master account"),
-    Doc = wh_json:set_values([{<<"pvt_type">>, ?PVT_TYPE}
-                              ,{<<"_id">>, DocId}
-                             ], ReqTemplate),
+    Doc = kz_notification:set_base_properties(ReqTemplate, DocId),
     cb_context:setters(Context
                        ,[{fun cb_context:set_doc/2, Doc}
                          ,{fun cb_context:set_account_db/2, wh_util:format_account_id(AccountId, 'encoded')}
@@ -774,30 +963,28 @@ create_new_notification(Context, DocId, ReqTemplate, AccountId) ->
 
 -spec clean_req_doc(wh_json:object()) -> wh_json:object().
 clean_req_doc(Doc) ->
-    wh_json:delete_keys([?MACROS], Doc).
+    wh_json:delete_keys([?MACROS
+                         ,<<"templates">>
+                        ], Doc).
 
 %%--------------------------------------------------------------------
 %% @private
 %% @doc
 %% @end
 %%--------------------------------------------------------------------
--spec db_id(ne_binary()) -> ne_binary().
-db_id(<<"notification.", _/binary>> = Id) -> Id;
-db_id(Id) -> <<"notification.", Id/binary>>.
-
--spec resp_id(ne_binary()) -> ne_binary().
-resp_id(<<"notification.", Id/binary>>) -> Id;
-resp_id(Id) -> Id.
-
 -spec leak_doc_id(cb_context:context()) -> cb_context:context().
 leak_doc_id(Context) ->
     RespData = cb_context:resp_data(Context),
-    DocId = wh_json:get_first_defined([<<"_id">>, <<"id">>], RespData),
-    cb_context:set_resp_data(Context, wh_json:set_value(<<"id">>, resp_id(DocId), RespData)).
+    cb_context:set_resp_data(Context
+                             ,wh_json:set_value(<<"id">>
+                                                ,kz_notification:resp_id(RespData)
+                                                ,RespData
+                                               )
+                            ).
 
 -spec leak_attachments(cb_context:context()) -> cb_context:context().
 leak_attachments(Context) ->
-    Attachments = wh_json:get_value(<<"_attachments">>, cb_context:fetch(Context, 'db_doc'), wh_json:new()),
+    Attachments = wh_doc:attachments(cb_context:fetch(Context, 'db_doc'), wh_json:new()),
     Templates = wh_json:foldl(fun leak_attachments_fold/3, wh_json:new(), Attachments),
     cb_context:set_resp_data(Context
                              ,wh_json:set_value(<<"templates">>, Templates, cb_context:resp_data(Context))

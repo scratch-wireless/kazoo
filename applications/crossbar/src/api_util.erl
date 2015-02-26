@@ -40,7 +40,7 @@
 
 -define(MAX_UPLOAD_SIZE, whapps_config:get_integer(?CONFIG_CAT, <<"max_upload_size">>, 8000000)).
 
--type cowboy_multipart_response() :: {{'headers', cowboy_http:headers()} |
+-type cowboy_multipart_response() :: {{'headers', cowboy:http_headers()} |
                                       {'data', binary()} |
                                       'end_of_part' |
                                       'eof'
@@ -244,7 +244,7 @@ maybe_extract_multipart(Context, Req0, QS) ->
     end.
 
 -spec try_json(ne_binary(), wh_json:object(), cb_context:context(), cowboy_req:req()) ->
-                      {cb_context:context(), cowbow_req:req()} |
+                      {cb_context:context(), cowboy_req:req()} |
                       halt_return().
 try_json(ReqBody, QS, Context, Req) ->
     try get_json_body(ReqBody, Req) of

@@ -35,6 +35,7 @@
         ]).
 -export([redirect/2
          ,redirect/3
+         ,redirect_to_node/3
         ]).
 -export([answer/1, answer_now/1
          ,hangup/1, hangup/2
@@ -614,6 +615,23 @@ redirect(Contact, Server, Call) ->
     'ok'.
 
 %%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% Create a redirect request to Node
+%% @end
+%%--------------------------------------------------------------------
+-spec redirect_to_node(ne_binary(), api_binary(), whapps_call:call()) -> 'ok'.
+redirect_to_node(Contact, Node, Call) ->
+    lager:debug("redirect ~s to ~s", [Contact, Node]),
+    Command = [{<<"Redirect-Contact">>, Contact}
+               ,{<<"Redirect-Node">>, Node}
+               ,{<<"Application-Name">>, <<"redirect">>}
+              ],
+    send_command(Command, Call),
+    timer:sleep(2000),
+    'ok'.
+
+%%--------------------------------------------------------------------
 %% @public
 %% @doc
 %% @end
@@ -1108,11 +1126,11 @@ b_prompt(Prompt, Lang, Call) ->
 -spec play(ne_binary(), api_binaries(), api_binary(), whapps_call:call()) ->
                   ne_binary().
 
--spec play_command(ne_binary(), whapps_call:call()) ->
+-spec play_command(ne_binary(), whapps_call:call() | ne_binary()) ->
                           wh_json:object().
--spec play_command(ne_binary(), api_binaries(), whapps_call:call()) ->
+-spec play_command(ne_binary(), api_binaries(), whapps_call:call() | ne_binary()) ->
                           wh_json:object().
--spec play_command(ne_binary(), api_binaries(), api_binary(), whapps_call:call()) ->
+-spec play_command(ne_binary(), api_binaries(), api_binary(), whapps_call:call() | ne_binary()) ->
                           wh_json:object().
 
 -spec b_play(ne_binary(), whapps_call:call()) ->
@@ -1126,15 +1144,17 @@ play_command(Media, Call) ->
     play_command(Media, ?ANY_DIGIT, Call).
 play_command(Media, Terminators, Call) ->
     play_command(Media, Terminators, 'undefined', Call).
-play_command(Media, Terminators, Leg, Call) ->
+play_command(Media, Terminators, Leg, <<_/binary>> = CallId) ->
     wh_json:from_list(
       props:filter_undefined(
         [{<<"Application-Name">>, <<"play">>}
          ,{<<"Media-Name">>, Media}
          ,{<<"Terminators">>, play_terminators(Terminators)}
          ,{<<"Leg">>, play_leg(Leg)}
-         ,{<<"Call-ID">>, whapps_call:call_id(Call)}
-        ])).
+         ,{<<"Call-ID">>, CallId}
+        ]));
+play_command(Media, Terminators, Leg, Call) ->
+    play_command(Media, Terminators, Leg, whapps_call:call_id(Call)).
 
 -spec play_terminators(api_binaries()) -> ne_binaries().
 play_terminators('undefined') -> ?ANY_DIGIT;

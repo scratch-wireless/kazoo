@@ -16,9 +16,10 @@
 
          ,attachment_name/2
          ,content_type_to_extension/1
+         ,parse_media_type/1
 
          ,bucket_name/1
-         ,token_cost/1, token_cost/2
+         ,token_cost/1, token_cost/2, token_cost/3
          ,reconcile_services/1
          ,bind/2
 
@@ -48,22 +49,29 @@ range_view_options(Context, MaxRange) ->
 
     case CreatedTo - CreatedFrom of
         N when N < 0 ->
-            Message = <<"created_from is prior to created_to">>,
-            cb_context:add_validation_error(<<"created_from">>
-                                            ,<<"date_range">>
-                                            ,Message
-                                            ,Context
-                                           );
+            cb_context:add_validation_error(
+                <<"created_from">>
+                ,<<"date_range">>
+                ,wh_json:from_list([
+                    {<<"message">>, <<"created_from is prior to created_to">>}
+                    ,{<<"cause">>, CreatedFrom}
+                 ])
+                ,Context
+            );
         N when N > MaxRange ->
             Message = <<"created_to is more than "
                         ,(wh_util:to_binary(MaxRange))/binary
                         ," seconds from created_from"
                       >>,
-            cb_context:add_validation_error(<<"created_from">>
-                                            ,<<"date_range">>
-                                            ,Message
-                                            ,Context
-                                           );
+            cb_context:add_validation_error(
+                <<"created_from">>
+                ,<<"date_range">>
+                ,wh_json:from_list([
+                    {<<"message">>, Message}
+                    ,{<<"cause">>, CreatedTo}
+                 ])
+                ,Context
+            );
         _N -> {CreatedFrom, CreatedTo}
     end.
 
@@ -402,6 +410,12 @@ content_type_to_extension(<<"image/png">>) -> <<"png">>;
 content_type_to_extension(<<"image/gif">>) -> <<"gif">>;
 content_type_to_extension(<<"text/html">>) -> <<"html">>;
 content_type_to_extension(<<"text/plain">>) -> <<"txt">>.
+
+-spec parse_media_type(ne_binary()) ->
+                              {'error', 'badarg'} |
+                              media_values().
+parse_media_type(MediaType) ->
+    cowboy_http:nonempty_list(MediaType, fun cowboy_http:media_range/2).
 
 -spec bucket_name(cb_context:context()) -> ne_binary().
 -spec bucket_name(api_binary(), api_binary()) -> ne_binary().

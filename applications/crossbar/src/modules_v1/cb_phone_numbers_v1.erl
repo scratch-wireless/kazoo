@@ -273,15 +273,27 @@ validate(#cb_context{req_verb = ?HTTP_DELETE}=Context, Number, ?PORT_DOCS, _) ->
     read(Number, Context);
 validate(#cb_context{req_files=[]}=Context, _, ?PORT_DOCS, _) ->
     lager:debug("No files in request to save attachment"),
-    Message = <<"please provide an port document">>,
-    cb_context:add_validation_error(<<"file">>, <<"required">>, Message, Context);
+    cb_context:add_validation_error(
+        <<"file">>
+        ,<<"required">>
+        ,wh_json:from_list([
+            {<<"message">>, <<"Please provide an port document">>}
+         ])
+        ,Context
+    );
 validate(#cb_context{req_files=[{_, FileObj}]}=Context, Number, ?PORT_DOCS, Name) ->
     FileName = wh_util:to_binary(http_uri:encode(wh_util:to_list(Name))),
     read(Number, Context#cb_context{req_files=[{FileName, FileObj}]});
 validate(Context, _, ?PORT_DOCS, _) ->
     lager:debug("Multiple files in request to save attachment"),
-    Message = <<"please provide a single port document per request">>,
-    cb_context:add_validation_error(<<"file">>, <<"maxItems">>, Message, Context).
+    cb_context:add_validation_error(
+        <<"file">>
+        ,<<"maxItems">>
+        ,wh_json:from_list([
+            {<<"message">>, <<"Please provide a single port document per request">>}
+         ])
+        ,Context
+    ).
 
 -spec post(cb_context:context(), path_token()) ->
                   cb_context:context().
@@ -406,7 +418,11 @@ clean_summary(Context) ->
 identify(Context, Number) ->
     case wh_number_manager:lookup_account_by_number(Number) of
         {'error', 'not_reconcilable'} ->
-            cb_context:add_system_error('bad_identifier', [{'details', Number}], Context);
+            cb_context:add_system_error(
+                'bad_identifier'
+                ,wh_json:from_list([{<<"cause">>, Number}])
+                ,Context
+            );
         {'error', E} ->
             set_response({wh_util:to_binary(E), <<>>}, Number, Context);
         {'ok', AccountId, Options} ->
@@ -437,19 +453,26 @@ read(Number, Context) ->
 %%--------------------------------------------------------------------
 -spec find_numbers(cb_context:context()) -> cb_context:context().
 find_numbers(Context) ->
-    AccountId = cb_context:auth_account_id(Context),
-    QueryString = wh_json:set_value(<<"Account-ID">>, AccountId, cb_context:query_string(Context)),
+    JObj = get_find_numbers_req(Context),
     OnSuccess = fun(C) ->
-                    cb_context:set_resp_data(
-                        cb_context:set_resp_status(C, 'success')
-                        ,get_numbers(QueryString)
-                    )
+                        cb_context:setters(C
+                                           ,[{fun cb_context:set_resp_data/2, get_numbers(JObj)}
+                                             ,{fun cb_context:set_resp_status/2, 'success'}
+                                            ])
                 end,
-    Schema = wh_json:decode(?FIND_NUMBER_SCHEMA),
-    cb_context:validate_request_data(Schema
-                                     ,cb_context:set_req_data(Context, QueryString)
+    cb_context:validate_request_data(wh_json:decode(?FIND_NUMBER_SCHEMA)
+                                     ,cb_context:set_req_data(Context, JObj)
                                      ,OnSuccess
                                     ).
+
+-spec get_find_numbers_req(cb_context:context()) -> wh_json:object().
+get_find_numbers_req(Context) ->
+    JObj = cb_context:query_string(Context),
+    AccountId = cb_context:auth_account_id(Context),
+    Quantity = wh_json:get_integer_value(<<"quantity">>, JObj, 1),
+    wh_json:set_values([{<<"quantity">>, Quantity}
+                       ,{<<"Account-ID">>, AccountId}
+                       ], JObj).
 
 %%--------------------------------------------------------------------
 %% @private
@@ -659,7 +682,7 @@ collection_action(#cb_context{req_verb = ?HTTP_POST}=Context, Number) ->
             {State, Error}
     end;
 collection_action(#cb_context{req_verb = ?HTTP_DELETE}=Context, Number) ->
-    wh_number_manager:release_number(Number, cb_context:auth_accuont_id(Context)).
+    wh_number_manager:release_number(Number, cb_context:auth_account_id(Context)).
 
 collection_action(#cb_context{req_verb = ?HTTP_PUT}=Context, Number, ?ACTIVATE) ->
     case wh_number_manager:assign_number_to_account(Number
