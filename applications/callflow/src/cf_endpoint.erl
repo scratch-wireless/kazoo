@@ -88,17 +88,17 @@ maybe_have_endpoint(JObj, EndpointId, AccountDb) ->
         <<"device">> = EndpointType ->
             Endpoint = wh_json:set_value(<<"Endpoint-ID">>, EndpointId, merge_attributes(JObj, EndpointType)),
             CacheProps = [{'origin', cache_origin(JObj, EndpointId, AccountDb)}],
-            wh_cache:store_local(?CALLFLOW_CACHE, {?MODULE, AccountDb, EndpointId}, Endpoint, CacheProps),
+            catch wh_cache:store_local(?CALLFLOW_CACHE, {?MODULE, AccountDb, EndpointId}, Endpoint, CacheProps),
             {'ok', Endpoint};
         <<"user">> = EndpointType ->
             Endpoint = wh_json:set_value(<<"Endpoint-ID">>, EndpointId, merge_attributes(JObj, EndpointType)),
             CacheProps = [{'origin', cache_origin(JObj, EndpointId, AccountDb)}],
-            wh_cache:store_local(?CALLFLOW_CACHE, {?MODULE, AccountDb, EndpointId}, Endpoint, CacheProps),
+            catch wh_cache:store_local(?CALLFLOW_CACHE, {?MODULE, AccountDb, EndpointId}, Endpoint, CacheProps),
             {'ok', Endpoint};
         <<"account">> = EndpointType ->
             Endpoint = wh_json:set_value(<<"Endpoint-ID">>, EndpointId, merge_attributes(JObj, EndpointType)),
             CacheProps = [{'origin', cache_origin(JObj, EndpointId, AccountDb)}],
-            wh_cache:store_local(?CALLFLOW_CACHE, {?MODULE, AccountDb, EndpointId}, Endpoint, CacheProps),
+            catch wh_cache:store_local(?CALLFLOW_CACHE, {?MODULE, AccountDb, EndpointId}, Endpoint, CacheProps),
             {'ok', Endpoint};
         _Else ->
             lager:info("endpoint module does not manage document type ~s", [_Else]),
@@ -593,7 +593,9 @@ create_endpoints(Endpoint, Properties, Call) ->
           end,
     case lists:foldl(Fun, [], Routines) of
         [] -> {'error', 'no_endpoints'};
-        Endpoints -> {'ok', Endpoints}
+        Endpoints ->
+            cf_util:maybe_start_metaflows(Call, Endpoints),
+            {'ok', Endpoints}
     end.
 
 -type ep_routine() :: fun((wh_json:object(), wh_json:object(), whapps_call:call()) ->
@@ -1084,8 +1086,13 @@ generate_sip_headers(Endpoint, Call) ->
                                   wh_json:object().
 generate_sip_headers(Endpoint, Acc, Call) ->
     Inception = whapps_call:inception(Call),
+    SIP = wh_json:get_value(<<"sip">>, Endpoint),
+
+    Realm = wh_json:get_value(<<"realm">>, SIP, whapps_call:account_realm(Call)),
+    Username = wh_json:get_value(<<"username">>, SIP),
+
     HeaderFuns = [fun(J) ->
-                          case wh_json:get_value([<<"sip">>, <<"custom_sip_headers">>], Endpoint) of
+                          case wh_json:get_value(<<"custom_sip_headers">>, SIP) of
                               'undefined' -> J;
                               CustomHeaders ->
                                   wh_json:merge_jobjs(CustomHeaders, J)
@@ -1101,6 +1108,9 @@ generate_sip_headers(Endpoint, Acc, Call) ->
                                'undefined' -> J;
                                Ringtone -> wh_json:set_value(<<"Alert-Info">>, Ringtone, J)
                            end
+                   end
+                  ,fun(J) ->
+                          wh_json:set_value(<<"X-KAZOO-AOR">>, <<"sip:", Username/binary, "@", Realm/binary>> , J)
                    end
                  ],
     lists:foldr(fun(F, JObj) -> F(JObj) end, Acc, HeaderFuns).
