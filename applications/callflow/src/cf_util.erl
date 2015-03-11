@@ -42,7 +42,9 @@
 -export([owner_ids_by_sip_username/2]).
 -export([apply_dialplan/2]).
 -export([encryption_method_map/2]).
--export([maybe_start_metaflows/2]).
+-export([maybe_start_metaflow/2
+         ,maybe_start_metaflows/2
+        ]).
 -export([sip_users_from_device_ids/2]).
 
 -export([caller_belongs_to_group/2
@@ -753,16 +755,14 @@ maybe_start_metaflows(Call, Endpoints) ->
     'ok'.
 
 maybe_start_metaflow(Call, Endpoint) ->
-    case wh_json:get_value(<<"Metaflows">>, Endpoint) of
+    case wh_json:get_first_defined([<<"metaflows">>, <<"Metaflows">>], Endpoint) of
         'undefined' -> 'ok';
         ?EMPTY_JSON_OBJECT -> 'ok';
         JObj ->
+            Id = wh_json:get_first_defined([<<"_id">>, <<"Endpoint-ID">>], Endpoint),
             API = props:filter_undefined(
-                    [{<<"Endpoint-ID">>, wh_json:get_value(<<"Endpoint-ID">>, Endpoint)}
-                     ,{<<"Call">>, whapps_call:to_json(
-                                     set_callee(Call, Endpoint)
-                                    )
-                      }
+                    [{<<"Endpoint-ID">>, Id}
+                     ,{<<"Call">>, whapps_call:to_json(Call)}
                      ,{<<"Numbers">>, wh_json:get_value(<<"numbers">>, JObj)}
                      ,{<<"Patterns">>, wh_json:get_value(<<"patterns">>, JObj)}
                      ,{<<"Binding-Digit">>, wh_json:get_value(<<"binding_digit">>, JObj)}
@@ -771,18 +771,12 @@ maybe_start_metaflow(Call, Endpoint) ->
                      | wh_api:default_headers(?APP_NAME, ?APP_VERSION)
                     ]),
             lager:debug("sending metaflow for endpoint: ~s: ~s"
-                        ,[wh_json:get_value(<<"Endpoint-ID">>, Endpoint), wh_json:get_value(<<"listen_on">>, JObj)]
+                        ,[Id
+                          ,wh_json:get_value(<<"listen_on">>, JObj)
+                         ]
                        ),
             whapps_util:amqp_pool_send(API, fun wapi_dialplan:publish_metaflow/1)
     end.
-
--spec set_callee(whapps_call:call(), wh_json:object()) -> whapps_call:call().
-set_callee(Call, Endpoint) ->
-    whapps_call:exec([{fun whapps_call:set_callee_id_name/2, wh_json:get_value(<<"Callee-ID-Name">>, Endpoint)}
-                      ,{fun whapps_call:set_callee_id_number/2, wh_json:get_value(<<"Callee-ID-Number">>, Endpoint)}
-                     ]
-                     ,Call
-                    ).
 
 -spec caller_belongs_to_group(ne_binary(), whapps_call:call()) -> boolean().
 caller_belongs_to_group(GroupId, Call) ->
