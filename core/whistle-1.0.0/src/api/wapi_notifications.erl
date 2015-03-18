@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%%% @copyright (C) 2011-2014, 2600Hz
+%%% @copyright (C) 2011-2015, 2600Hz
 %%% @doc
 %%% Notification messages, like voicemail left
 %%% @end
@@ -168,7 +168,7 @@
 -define(FAX_INBOUND_ERROR_TYPES, []).
 
 -define(FAX_OUTBOUND_HEADERS, [<<"Caller-ID-Number">>, <<"Callee-ID-Number">>
-                               ,<<"Account-ID">>, <<"Fax-JobId">>
+                               ,<<"Account-ID">>, <<"Fax-JobId">>, <<"Fax-ID">>
                               ]).
 -define(OPTIONAL_FAX_OUTBOUND_HEADERS, [<<"Caller-ID-Name">>, <<"Callee-ID-Name">>
                                         ,<<"Call-ID">>, <<"Fax-Info">>
@@ -228,7 +228,8 @@
 
 %% Notify Password Recovery
 -define(PWD_RECOVERY_HEADERS, [<<"Email">>, <<"Password">>, <<"Account-ID">>]).
--define(OPTIONAL_PWD_RECOVERY_HEADERS, [<<"First-Name">>, <<"Last-Name">>, <<"Account-DB">>, <<"Request">>
+-define(OPTIONAL_PWD_RECOVERY_HEADERS, [<<"First-Name">>, <<"Last-Name">>
+                                        ,<<"Account-DB">>, <<"Request">>
                                         | ?DEFAULT_OPTIONAL_HEADERS
                                        ]).
 -define(PWD_RECOVERY_VALUES, [{<<"Event-Category">>, <<"notification">>}
@@ -238,7 +239,8 @@
 
 %% Notify New Account
 -define(NEW_ACCOUNT_HEADERS, [<<"Account-ID">>]).
--define(OPTIONAL_NEW_ACCOUNT_HEADERS, [<<"Account-DB">>, <<"Account-Name">>, <<"Account-API-Key">>, <<"Account-Realm">>
+-define(OPTIONAL_NEW_ACCOUNT_HEADERS, [<<"Account-DB">>, <<"Account-Name">>
+                                       ,<<"Account-API-Key">>, <<"Account-Realm">>
                                        | ?DEFAULT_OPTIONAL_HEADERS
                                       ]).
 -define(NEW_ACCOUNT_VALUES, [{<<"Event-Category">>, <<"notification">>}
@@ -371,10 +373,20 @@ headers(<<"voicemail_full">>) ->
     ?VOICEMAIL_FULL_HEADERS ++ ?OPTIONAL_VOICEMAIL_FULL_HEADERS;
 headers(<<"fax_inbound_to_email">>) ->
     ?FAX_INBOUND_HEADERS ++ ?OPTIONAL_FAX_INBOUND_HEADERS;
+headers(<<"fax_outbound_to_email">>) ->
+    ?FAX_OUTBOUND_HEADERS ++ ?OPTIONAL_FAX_OUTBOUND_HEADERS;
+headers(<<"new_account">>) ->
+    ?NEW_ACCOUNT_HEADERS ++ ?OPTIONAL_NEW_ACCOUNT_HEADERS;
+headers(<<"new_user">>) ->
+    ?NEW_USER_HEADERS ++ ?OPTIONAL_NEW_USER_HEADERS;
+headers(<<"deregister">>) ->
+    ?DEREGISTER_HEADERS ++ ?OPTIONAL_DEREGISTER_HEADERS;
+headers(<<"password_recovery">>) ->
+    ?PWD_RECOVERY_HEADERS ++ ?OPTIONAL_PWD_RECOVERY_HEADERS;
 headers(<<"skel">>) ->
     ?SKEL_HEADERS ++ ?OPTIONAL_SKEL_HEADERS;
 headers(_Notification) ->
-    lager:debug("no notification headers for ~s", [_Notification]),
+    lager:warning("no notification headers for ~s", [_Notification]),
     [].
 
 %%--------------------------------------------------------------------

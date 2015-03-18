@@ -6,6 +6,8 @@
 %%% @contributors
 %%%   Karl Anderson
 %%%   James Aimonetti
+%%%
+%%% Fix KAZOO-3406: Sponsored by Velvetech LLC, implemented by SIPLABS LLC
 %%%-------------------------------------------------------------------
 -module(whapps_call_command).
 
@@ -439,9 +441,7 @@ response(Code, Call) ->
 response(Code, Cause, Call) ->
     response(Code, Cause, 'undefined', Call).
 response(Code, Cause, Media, Call) ->
-    CallId = whapps_call:call_id(Call),
-    CtrlQ = whapps_call:control_queue(Call),
-    wh_call_response:send(CallId, CtrlQ, Code, Cause, Media).
+    wh_call_response:send(Call, Code, Cause, Media).
 
 %%--------------------------------------------------------------------
 %% @public
@@ -1347,6 +1347,7 @@ record_call(Media, Action, TimeLimit, Terminators, Call) ->
     Destination = props:get_value(<<"Media-Transfer-Destination">>, Media),
     Headers = props:get_value(<<"Additional-Headers">>, Media),
     Limit = props:get_value(<<"Time-Limit">>, Media, wh_util:to_binary(TimeLimit)),
+    SampleRate = props:get_value(<<"Record-Sample-Rate">>, Media),
 
     Command = props:filter_undefined(
                 [{<<"Application-Name">>, <<"record_call">>}
@@ -1358,6 +1359,7 @@ record_call(Media, Action, TimeLimit, Terminators, Call) ->
                  ,{<<"Media-Transfer-Method">>, Method}
                  ,{<<"Media-Transfer-Destination">>, Destination}
                  ,{<<"Additional-Headers">>, Headers}
+                 ,{<<"Record-Sample-Rate">>, SampleRate}
                 ]),
     send_command(Command, Call).
 

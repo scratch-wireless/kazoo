@@ -32,6 +32,8 @@
 -export([descendants_count/0, descendants_count/1]).
 -export([migrate_ring_group_callflow/1]).
 
+-export([init_apps/2, init_app/2]).
+
 -include_lib("crossbar.hrl").
 
 -type input_term() :: atom() | string() | ne_binary().
@@ -789,14 +791,138 @@ save_old_ring_group(JObj, NewCallflow) ->
             io:format("  saved ring group callflow: ~s~n", [wh_json:encode(_OldJObj)])
     end.
 
+-spec init_apps(ne_binary(), ne_binary()) -> 'ok'.
+init_apps(AppsPath, AppUrl) ->
+    Apps = find_apps(AppsPath),
+    InitApp = fun (App) -> init_app(App, AppUrl) end,
+    lists:foreach(InitApp, Apps).
+
+-spec find_apps(ne_binary()) -> {'ok', ne_binaries()}.
+find_apps(AppsPath) ->
+    AccFun =
+        fun (AppJSONPath, Acc) ->
+                App = filename:absname(AppJSONPath),
+                %% App/metadata/app.json --> App
+                [filename:dirname(filename:dirname(App)) | Acc]
+        end,
+    filelib:fold_files(AppsPath, "app\\.json", 'true', AccFun, []).
+
+-spec init_app(ne_binary(), ne_binary()) -> 'ok'.
+init_app(AppPath, AppUrl) ->
+    io:format("trying to init app from ~s~n", [AppPath]),
+    try find_metadata(AppPath) of
+        {'ok', MetaData} ->
+            maybe_create_app(AppPath, wh_json:set_value(<<"api_url">>, AppUrl, MetaData));
+        {'invalid_data', _E} ->
+            io:format("  failed to validate app data ~s: ~p~n", [AppPath, _E])
+    catch
+        'error':{'badmatch', {'error', 'enoent'}} ->
+            io:format("  failed to incorporate app because there was no app.json in ~s~n"
+                      ,[filename:join([AppPath, <<"metadata">>])]
+                     );
+        'error':_E ->
+            io:format("  failed to find metadata in ~s: ~p~n", [AppPath, _E])
+    end.
+
+-spec maybe_create_app(ne_binary(), wh_json:object()) -> 'ok'.
+-spec maybe_create_app(ne_binary(), wh_json:object(), ne_binary()) -> 'ok'.
+maybe_create_app(AppPath, MetaData) ->
+    {'ok', MasterAccountDb} = whapps_util:get_master_account_db(),
+    maybe_create_app(AppPath, MetaData, MasterAccountDb).
+
+maybe_create_app(AppPath, MetaData, MasterAccountDb) ->
+    AppName = wh_json:get_value(<<"name">>, MetaData),
+    case find_app(MasterAccountDb, AppName) of
+        {'ok', _JObj} -> io:format(" app ~s already loaded in system~n", [AppName]);
+        {'error', 'not_found'} -> create_app(AppPath, MetaData, MasterAccountDb);
+        {'error', _E} -> io:format(" failed to find app ~s: ~p", [AppName, _E])
+    end.
+
+-spec find_app(ne_binary(), ne_binary()) -> {'ok', wh_json:object()} |
+                                            {'error', _}.
+find_app(Db, Name) ->
+    case couch_mgr:get_results(Db, <<"apps_store/crossbar_listing">>, [{'key', Name}]) of
+        {'ok', []} -> {'error', 'not_found'};
+        {'ok', [View]} -> {'ok', View};
+        {'error', _}=E -> E
+    end.
+
+-spec create_app(ne_binary(), wh_json:object(), ne_binary()) -> 'ok'.
+create_app(AppPath, MetaData, MasterAccountDb) ->
+    Doc = wh_json:delete_keys([<<"source_url">>]
+                              ,wh_doc:update_pvt_parameters(MetaData, MasterAccountDb, [{'type', <<"app">>}])
+                             ),
+    case couch_mgr:save_doc(MasterAccountDb, Doc) of
+        {'ok', JObj} ->
+            io:format(" saved app ~s as doc ~s~n", [wh_json:get_value(<<"name">>, JObj)
+                                                    ,wh_doc:id(JObj)
+                                                   ]),
+            maybe_add_icons(AppPath, wh_doc:id(JObj), MasterAccountDb);
+        {'error', _E} ->
+            io:format(" failed to save app ~s: ~p", [wh_json:get_value(<<"name">>, MetaData), _E])
+    end.
+
+-spec maybe_add_icons(ne_binary(), ne_binary(), ne_binary()) -> 'ok'.
+maybe_add_icons(AppPath, AppId, MasterAccountDb) ->
+    try find_icons(AppPath) of
+        {'ok', Icons} -> add_icons(AppId, MasterAccountDb, Icons)
+    catch
+        'error':{'badmatch', {'error', 'enoent'}} ->
+            io:format("  failed to find icons in ~s~n", [AppPath]);
+        'error':_E ->
+            io:format("  failed to load icons from ~s: ~p~n", [AppPath, _E])
+    end.
+
+-spec add_icons(ne_binary(), ne_binary(), wh_proplist()) -> 'ok'.
+add_icons(AppId, MasterAccountDb, Icons) ->
+    [add_icon(AppId, MasterAccountDb, IconId, IconData) || {IconId, IconData} <- Icons],
+    'ok'.
+
+-spec add_icon(ne_binary(), ne_binary(), ne_binary(), binary()) -> 'ok'.
+add_icon(AppId, MasterAccountDb, IconId, IconData) ->
+    case couch_mgr:put_attachment(MasterAccountDb, AppId, IconId, IconData) of
+        {'ok', _} -> io:format("   saved ~s to ~s~n", [IconId, AppId]);
+        {'error', _E} -> io:format("   failed to save ~s to ~s: ~p~n", [IconId, AppId, _E])
+    end.
+
+-spec find_icons(ne_binary()) -> {'ok', wh_proplist()}.
+find_icons(AppPath) ->
+    {'ok', Dirs} = file:list_dir(AppPath),
+    case lists:member("icon", Dirs) of
+        'true' -> read_icons(filename:join([AppPath, <<"icon">>]));
+        'false' -> read_icons(filename:join([AppPath, <<"metadata">>, <<"icon">>]))
+    end.
+
+-spec read_icons(ne_binary()) -> {'ok', wh_proplist()}.
+read_icons(IconPath) ->
+    {'ok', Icons} = file:list_dir(IconPath),
+    {'ok', [{Icon, read_icon(IconPath, Icon)} || Icon <- Icons]}.
+
+-spec read_icon(ne_binary(), ne_binary()) -> binary().
+read_icon(Path, File) ->
+    {'ok', IconData} = file:read_file(filename:join([Path, File])),
+    IconData.
+
+-spec find_metadata(ne_binary()) -> {'ok', wh_json:object()} | {'invalid_data', wh_proplist()}.
+find_metadata(AppPath) ->
+    AppJSONPath = filename:join([AppPath, <<"metadata">>, <<"app.json">>]),
+    {'ok', JSON} = file:read_file(AppJSONPath),
+    JObj = wh_json:decode(JSON),
+    {'ok', Schema} = wh_json_schema:load(<<"app">>),
+    case jesse:validate_with_schema(Schema, wh_json:public_fields(JObj)) of
+        {'ok', _}=OK -> OK;
+        {'error', Errors} ->
+            {'invalid_data', [Error || {'data_invalid', _, Error, _, _} <- Errors]}
+    end.
+
 -ifdef(TEST).
 
--include("eunit/include/eunit.hrl").
+-include_lib("eunit/include/eunit.hrl").
 
 migrate_ring_group_callflow_test() ->
-    OldCallflow = <<"{\"_id\":\"cccaaaaaa\",\"numbers\":[\"1234\"],\"name\":\"Some Ring Group\",\"flow\":{\"module\":\"ring_group\",\"children\":{\"_\":{\"data\":{\"id\":\"vvvaaaaaa\"},\"module\":\"voicemail\",\"children\":{}}},\"data\":{\"strategy\":\"simultaneous\",\"timeout\":120,\"endpoints\":[{\"delay\":0,\"timeout\":40,\"id\":\"uuuaaaaaa\",\"endpoint_type\":\"user\"},{\"delay\":40,\"timeout\":40,\"id\":\"uuubbbbbb\",\"endpoint_type\":\"user\"}]}},\"group_id\":\"gggaaaaaa\",\"ui_metadata\":{\"version\":\"v3.19\",\"ui\":\"monster-ui\"},\"pvt_type\":\"callflow\"}">>,
+    _OldCallflow = <<"{\"_id\":\"cccaaaaaa\",\"numbers\":[\"1234\"],\"name\":\"Some Ring Group\",\"flow\":{\"module\":\"ring_group\",\"children\":{\"_\":{\"data\":{\"id\":\"vvvaaaaaa\"},\"module\":\"voicemail\",\"children\":{}}},\"data\":{\"strategy\":\"simultaneous\",\"timeout\":120,\"endpoints\":[{\"delay\":0,\"timeout\":40,\"id\":\"uuuaaaaaa\",\"endpoint_type\":\"user\"},{\"delay\":40,\"timeout\":40,\"id\":\"uuubbbbbb\",\"endpoint_type\":\"user\"}]}},\"group_id\":\"gggaaaaaa\",\"ui_metadata\":{\"version\":\"v3.19\",\"ui\":\"monster-ui\"},\"pvt_type\":\"callflow\"}">>,
 
-    NewCallflows = <<"[{\"_id\":\"cccaaaaaa\",\"numbers\":[\"1234\"],\"name\":\"Some Ring Group\",\"flow\":{\"module\":\"callflow\",\"children\":{\"_\":{\"data\":{\"id\":\"vvvaaaaaa\"},\"module\":\"voicemail\",\"children\":{}}},\"data\":{\"id\":\"cccbbbbbb\"}},\"group_id\":\"gggaaaaaa\",\"type\":\"userGroup\",\"ui_metadata\":{\"version\":\"v3.19\",\"ui\":\"monster-ui\"},\"pvt_type\":\"callflow\"},{\"_id\":\"cccbbbbbb\",\"numbers\":[\"abcdefghijklmnopqrstuvwxy\"],\"name\":\"Some Base Group\",\"flow\":{\"module\":\"ring_group\",\"children\":{},\"data\":{\"strategy\":\"simultaneous\",\"timeout\":120,\"endpoints\":[{\"delay\":0,\"timeout\":40,\"id\":\"uuuaaaaaa\",\"endpoint_type\":\"user\"},{\"delay\":40,\"timeout\":40,\"id\":\"uuubbbbbb\",\"endpoint_type\":\"user\"}]}},\"group_id\":\"gggaaaaaa\",\"type\":\"baseGroup\",\"ui_metadata\":{\"version\":\"v3.19\",\"ui\":\"monster-ui\"},\"pvt_type\":\"callflow\"}]">>,
+    _NewCallflows = <<"[{\"_id\":\"cccaaaaaa\",\"numbers\":[\"1234\"],\"name\":\"Some Ring Group\",\"flow\":{\"module\":\"callflow\",\"children\":{\"_\":{\"data\":{\"id\":\"vvvaaaaaa\"},\"module\":\"voicemail\",\"children\":{}}},\"data\":{\"id\":\"cccbbbbbb\"}},\"group_id\":\"gggaaaaaa\",\"type\":\"userGroup\",\"ui_metadata\":{\"version\":\"v3.19\",\"ui\":\"monster-ui\"},\"pvt_type\":\"callflow\"},{\"_id\":\"cccbbbbbb\",\"numbers\":[\"abcdefghijklmnopqrstuvwxy\"],\"name\":\"Some Base Group\",\"flow\":{\"module\":\"ring_group\",\"children\":{},\"data\":{\"strategy\":\"simultaneous\",\"timeout\":120,\"endpoints\":[{\"delay\":0,\"timeout\":40,\"id\":\"uuuaaaaaa\",\"endpoint_type\":\"user\"},{\"delay\":40,\"timeout\":40,\"id\":\"uuubbbbbb\",\"endpoint_type\":\"user\"}]}},\"group_id\":\"gggaaaaaa\",\"type\":\"baseGroup\",\"ui_metadata\":{\"version\":\"v3.19\",\"ui\":\"monster-ui\"},\"pvt_type\":\"callflow\"}]">>,
 
 
     ok.

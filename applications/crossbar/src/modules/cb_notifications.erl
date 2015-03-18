@@ -82,7 +82,6 @@ authorize(Context, AuthAccountId, [{<<"notifications">>, _Id}]) ->
     cb_context:req_verb(Context) =:= ?HTTP_GET
         orelse AuthAccountId =:= MasterAccountId;
 authorize(_Context, _AuthAccountId, _Nouns) ->
-    lager:debug("not authz ~s for ~p", [_AuthAccountId, _Nouns]),
     'false'.
 
 %%--------------------------------------------------------------------
@@ -268,7 +267,9 @@ post(Context, Id) ->
 do_post(Context) ->
     Context1 = crossbar_doc:save(Context),
     case cb_context:resp_status(Context1) of
-        'success' -> leak_doc_id(Context1);
+        'success' ->
+            maybe_note_notification_preference(Context1),
+            leak_doc_id(Context1);
         _Status -> Context1
     end.
 
@@ -328,14 +329,22 @@ handle_preview_response(Context, Resp) ->
     end.
 
 -spec publish_fun(ne_binary()) -> fun((api_terms()) -> 'ok').
-publish_fun(<<"voicemail">>) ->
+publish_fun(<<"voicemail_to_email">>) ->
     fun wapi_notifications:publish_voicemail/1;
 publish_fun(<<"voicemail_full">>) ->
     fun wapi_notifications:publish_voicemail_full/1;
 publish_fun(<<"fax_inbound_to_email">>) ->
     fun wapi_notifications:publish_fax_inbound/1;
+publish_fun(<<"fax_outbound_to_email">>) ->
+    fun wapi_notifications:publish_fax_outbound/1;
+publish_fun(<<"new_account">>) ->
+    fun wapi_notifications:publish_new_account/1;
 publish_fun(<<"new_user">>) ->
     fun wapi_notifications:publish_new_user/1;
+publish_fun(<<"deregister">>) ->
+    fun wapi_notifications:publish_deregister/1;
+publish_fun(<<"password_recovery">>) ->
+    fun wapi_notifications:publish_pwd_recovery/1;
 publish_fun(_Id) ->
     lager:debug("no wapi_notification:publish_~s/1 defined", [_Id]),
     fun(_Any) -> 'ok' end.
@@ -607,14 +616,15 @@ maybe_note_notification_preference(Context) ->
 maybe_note_notification_preference(AccountDb, AccountJObj) ->
     case kz_account:notification_preference(AccountJObj) of
         'undefined' -> note_notification_preference(AccountDb, AccountJObj);
-        _Pref -> lager:debug("account already prefers ~s", [_Pref])
+        <<"teletype">> -> lager:debug("account already prefers teletype");
+        _Pref -> note_notification_preference(AccountDb, AccountJObj)
     end.
 
 -spec note_notification_preference(ne_binary(), wh_json:object()) -> 'ok'.
 note_notification_preference(AccountDb, AccountJObj) ->
     case couch_mgr:save_doc(AccountDb
                             ,kz_account:set_notification_preference(AccountJObj
-                                                                    ,kz_notification:pvt_type()
+                                                                    ,<<"teletype">>
                                                                    )
                            )
     of

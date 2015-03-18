@@ -32,11 +32,23 @@
                      ,{{'teletype_fax_inbound_to_email', 'handle_fax_inbound'}
                        ,[{<<"notification">>, <<"inbound_fax">>}]
                       }
+                     ,{{'teletype_fax_outbound_to_email', 'handle_fax_outbound'}
+                       ,[{<<"notification">>, <<"outbound_fax">>}]
+                      }
+                     ,{{'teletype_new_account', 'handle_new_account'}
+                       ,[{<<"notification">>, <<"new_account">>}]
+                      }
                      ,{{'teletype_new_user', 'handle_req'}
                        ,[{<<"notification">>, <<"new_user">>}]
                       }
                      ,{'teletype_template_skel'
                        ,[{<<"notification">>, <<"skel">>}]
+                      }
+                     ,{{'teletype_deregister', 'handle_deregister'}
+                       ,[{<<"notification">>, <<"deregister">>}]
+                      }
+                     ,{{'teletype_password_recovery', 'handle_password_recovery'}
+                       ,[{<<"notification">>, <<"password_recovery">>}]
                       }
                     ]).
 %% -define(RESPONDERS, []}
@@ -44,8 +56,8 @@
 %%                      ,{'teletype_fax_outbound_to_email', [{<<"notification">>, <<"outbound_fax">>}]}
 %%                      ,{'teletype_fax_inbound_error_to_email', [{<<"notification">>, <<"inbound_fax_error">>}]}
 %%                      ,{'teletype_fax_outbound_error_to_email', [{<<"notification">>, <<"outbound_fax_error">>}]}
-%%                      ,{'teletype_deregister', [{<<"notification">>, <<"deregister">>}]}
-%%                      ,{'teletype_password_recovery', [{<<"notification">>, <<"password_recovery">>}]}
+
+
 %%                      ,{'teletype_new_account', [{<<"notification">>, <<"new_account">>}]}
 %%                      ,{'teletype_cnam_request', [{<<"notification">>, <<"cnam_request">>}]}
 %%                      ,{'teletype_port_request', [{<<"notification">>, <<"port_request">>}]}
@@ -61,21 +73,21 @@
 -define(RESTRICT_TO, ['new_voicemail'
                       ,'voicemail_full'
                       ,'inbound_fax'
+                      ,'outbound_fax'
+                      ,'new_account'
                       ,'new_user'
 
                       %% ,'inbound_fax_error'
-                      %% ,'outbound_fax'
                       %% ,'outbound_fax_error'
-                      %% ,'deregister'
-                      %% ,'pwd_recovery'
-                      %% ,'new_account'
+                      ,'deregister'
+                      ,'pwd_recovery'
                       %% ,'cnam_requests'
                       %% ,'port_request'
                       %% ,'port_cancel'
                       %% ,'low_balance'
                       %% ,'transaction'
                       %% ,'system_alerts'
-                      ,'skel'
+                      %%,'skel'
                      ]).
 
 -define(BINDINGS, [{'notifications', [{'restrict_to', ?RESTRICT_TO}]}
@@ -181,9 +193,7 @@ handle_info(_Info, State) ->
 handle_event(JObj, _State) ->
     case should_handle(JObj) of
         'false' -> 'ignore';
-        'true' ->
-            lager:debug("handling notification for ~p", [wh_util:get_event_type(JObj)]),
-            {'reply', []}
+        'true' -> {'reply', []}
     end.
 
 %%--------------------------------------------------------------------
@@ -235,6 +245,6 @@ should_handle_account(Account) ->
 
     case couch_mgr:open_cache_doc(AccountDb, AccountId) of
         {'ok', AccountJObj} ->
-            kz_account:notification_preference(AccountJObj) =/= 'undefined';
+            kz_account:notification_preference(AccountJObj) =:= ?APP_NAME;
         {'error', _E} -> 'true'
     end.

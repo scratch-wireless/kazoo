@@ -1,23 +1,23 @@
 %%%-------------------------------------------------------------------
-%%% @copyright (C) 2014, 2600Hz Inc
+%%% @copyright (C) 2014-2015, 2600Hz Inc
 %%% @doc
 %%%
 %%% @end
 %%% @contributors
 %%%   James Aimonetti
 %%%-------------------------------------------------------------------
--module(teletype_fax_inbound_to_email).
+-module(teletype_fax_outbound_to_email).
 
 -export([init/0
-         ,handle_fax_inbound/2
+         ,handle_fax_outbound/2
         ]).
 
 -include("../teletype.hrl").
 
--define(MOD_CONFIG_CAT, <<(?NOTIFY_CONFIG_CAT)/binary, ".fax_inbound_to_email">>).
+-define(MOD_CONFIG_CAT, <<(?NOTIFY_CONFIG_CAT)/binary, ".fax_outbound_to_email">>).
 -define(FAX_CONFIG_CAT, <<(?NOTIFY_CONFIG_CAT)/binary, ".fax">>).
 
--define(TEMPLATE_ID, <<"fax_inbound_to_email">>).
+-define(TEMPLATE_ID, <<"fax_outbound_to_email">>).
 
 -define(TEMPLATE_MACROS
         ,wh_json:from_list(
@@ -38,11 +38,11 @@
            ]
           )).
 
--define(TEMPLATE_TEXT, <<"New Fax ({{fax.total_pages}} Pages)\n\nCaller ID: {{caller_id.number}}\nCaller Name: {{caller_id.name}}\n\nCalled To: {{to.user}}   (Originally dialed number)\nCalled On: {{date_called.local|date:\"l, F j, Y \\a\\t H:i\"}}\n\n\nFor help or questions about receiving faxes, please contact support at {{service.support_number}} or email {{service.support_email}}.">>).
--define(TEMPLATE_HTML, <<"<html><body><h3>New Fax ({{fax.total_pages}} Pages)</h3><table><tr><td>Caller ID</td><td>{{caller_id.name}} ({{caller_id.number}})</td></tr><tr><td>Callee ID</td><td>{{to.user}} (originally dialed number)</td></tr><tr><td>Call received</td><td>{{date_called.local|date:\"l, F j, Y \\a\\t H:i\"}}</td></tr></table><p>For help or questions about receiving faxes, please contact {{service.support_number}} or email <a href=\"mailto:{{service.support_email}}\">Support</a></p><p style=\"font-size: 9px;color:#C0C0C0\">{{fax.call_id}}</p></body></html>">>).
--define(TEMPLATE_SUBJECT, <<"New fax from {{caller_id.name}} ({{caller_id.number}})">>).
+-define(TEMPLATE_TEXT, <<"Sent New Fax ({{fax.total_pages}} Pages)\n\nCaller ID: {{caller_id.number}}\nCaller Name: {{caller_id.name}}\n\nCalled To: {{to.user}}   (Originally dialed number)\nCalled On: {{date_called.local|date:\"l, F j, Y \\a\\t H:i\"}}\n\n\nFor help or questions about receiving faxes, please contact support at {{service.support_number}} or email {{service.support_email}}.">>).
+-define(TEMPLATE_HTML, <<"<html><body><h3>Sent New Fax ({{fax.total_pages}} Pages)</h3><table><tr><td>Caller ID</td><td>{{caller_id.name}} ({{caller_id.number}})</td></tr><tr><td>Callee ID</td><td>{{to.user}} (originally dialed number)</td></tr><tr><td>Call received</td><td>{{date_called.local|date:\"l, F j, Y \\a\\t H:i\"}}</td></tr></table><p>For help or questions about receiving faxes, please contact {{service.support_number}} or email <a href=\"mailto:{{service.support_email}}\">Support</a></p><p style=\"font-size: 9px;color:#C0C0C0\">{{fax.call_id}}</p></body></html>">>).
+-define(TEMPLATE_SUBJECT, <<"Successfully sent fax to {{callee_id.name}} ({{callee_id.number}})">>).
 -define(TEMPLATE_CATEGORY, <<"fax">>).
--define(TEMPLATE_NAME, <<"Inbound Fax to Email">>).
+-define(TEMPLATE_NAME, <<"Outbound Fax to Email">>).
 
 -define(TEMPLATE_TO, ?CONFIGURED_EMAILS(?EMAIL_ORIGINAL)).
 -define(TEMPLATE_FROM, teletype_util:default_from_address(?MOD_CONFIG_CAT)).
@@ -70,8 +70,17 @@ init() ->
 -spec get_fax_doc(wh_json:object()) -> wh_json:object().
 get_fax_doc(DataJObj) ->
     AccountId = teletype_util:find_account_id(DataJObj),
+    AccountDb = ?WH_FAXES,
     FaxId = wh_json:get_value(<<"fax_id">>, DataJObj),
-    get_fax_doc_from_modb(DataJObj, AccountId, FaxId).
+
+    case couch_mgr:open_doc(AccountDb, FaxId) of
+        {'ok', FaxJObj} -> FaxJObj;
+        {'error', 'not_found'} ->
+            get_fax_doc_from_modb(DataJObj, AccountId, FaxId);
+        {'error', _E} ->
+            lager:debug("failed to find fax ~s: ~p", [FaxId, _E]),
+            maybe_send_failure(DataJObj, <<"Fax-ID was invalid">>)
+    end.
 
 -spec get_fax_doc_from_modb(wh_json:object(), ne_binary(), ne_binary()) -> wh_json:object().
 get_fax_doc_from_modb(DataJObj, AccountId, FaxId) ->
@@ -93,12 +102,12 @@ maybe_send_failure(DataJObj, Msg) ->
             throw({'error', 'no_fax_id'})
     end.
 
--spec handle_fax_inbound(wh_json:object(), wh_proplist()) -> 'ok'.
-handle_fax_inbound(JObj, _Props) ->
-    'true' = wapi_notifications:fax_inbound_v(JObj),
+-spec handle_fax_outbound(wh_json:object(), wh_proplist()) -> 'ok'.
+handle_fax_outbound(JObj, _Props) ->
+    'true' = wapi_notifications:fax_outbound_v(JObj),
     wh_util:put_callid(JObj),
 
-    lager:debug("processing fax inbound to email"),
+    lager:debug("processing fax outbound to email"),
 
     %% Gather data for template
     DataJObj =
@@ -111,12 +120,12 @@ handle_fax_inbound(JObj, _Props) ->
                           ),
 
     case teletype_util:should_handle_notification(DataJObj) of
-        'true' -> handle_fax_inbound(DataJObj);
+        'true' -> handle_fax_outbound(DataJObj);
         'false' -> lager:debug("notification handling not configured for this account")
     end.
 
--spec handle_fax_inbound(wh_json:object()) -> 'ok'.
-handle_fax_inbound(DataJObj) ->
+-spec handle_fax_outbound(wh_json:object()) -> 'ok'.
+handle_fax_outbound(DataJObj) ->
     FaxJObj = get_fax_doc(DataJObj),
 
     AccountId = teletype_util:find_account_id(DataJObj),
@@ -209,6 +218,7 @@ get_attachments(DataJObj, Macros, 'false') ->
 
     Filename = get_file_name(Macros, ToFormat),
     lager:debug("adding attachment as ~s", [Filename]),
+
     [{content_type_from_extension(Filename)
       ,Filename
       ,Converted
@@ -287,10 +297,10 @@ get_attachment_binary(Db, Id, Retries, AttachmentJObj) ->
 
 -spec fax_db(wh_json:object()) -> ne_binary().
 fax_db(DataJObj) ->
-    FaxId = wh_json:get_value(<<"fax_id">>, DataJObj),
-    AccountId = teletype_util:find_account_id(DataJObj),
-    <<Year:4/binary, Month:2/binary, "-", _/binary>> = FaxId,
-    kazoo_modb:get_modb(AccountId, Year, Month).
+    case teletype_util:find_account_db(DataJObj) of
+        'undefined' -> ?WH_FAXES;
+        Db -> Db
+    end.
 
 -spec build_template_data(wh_json:object()) -> wh_proplist().
 build_template_data(DataJObj) ->
