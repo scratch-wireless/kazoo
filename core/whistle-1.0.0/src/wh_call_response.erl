@@ -11,7 +11,6 @@
 -export([send/3, send/4, send/5]).
 -export([send_default/2]).
 -export([get_response/2]).
--export([default_response/1]).
 -export([config_doc_id/0]).
 
 -include_lib("whistle/include/wh_types.hrl").
@@ -137,11 +136,12 @@ do_send(CallId, CtrlQ, Commands) ->
 send_default(_Call, 'undefined') ->
     {'error', 'no_response'};
 send_default(Call, Cause) ->
-    lager:debug("attempting to send default response for ~s", [Cause]),
     case get_response(Cause, Call) of
         'undefined' ->
+            lager:debug("no default response for '~s' found", [Cause]),
             {'error', 'no_response'};
         Response ->
+            lager:debug("sending default response for '~s': ~p", [Cause, Response]),
             send_default_response(Call, Response)
     end.
 
@@ -166,7 +166,10 @@ send_default_response(Call, Response) ->
 %%--------------------------------------------------------------------
 -spec get_response(ne_binary(), whapps_call:call()) -> api_object().
 get_response(Cause, Call) ->
-    Default = default_response(Cause),
+    Default = case default_response(Cause) of
+                  'undefined' -> 'undefined';
+                  Props -> wh_json:from_list(Props)
+              end,
     AccountId = whapps_call:account_id(Call),
     whapps_account_config:get_global(AccountId, ?CALL_RESPONSE_CONF, Cause, Default).
 

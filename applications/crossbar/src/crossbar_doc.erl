@@ -34,6 +34,8 @@
         ,handle_couch_mgr_errors/3
         ]).
 
+-export_type([view_options/0]).
+
 -include("crossbar.hrl").
 
 -define(CROSSBAR_DOC_VSN, <<"1">>).
@@ -45,15 +47,21 @@
                    ,fun add_pvt_request_id/2
                   ]).
 
--define(PAGINATION_PAGE_SIZE, whapps_config:get_integer(?CONFIG_CAT
-                                                        ,<<"pagination_page_size">>
-                                                        ,50
-                                                       )).
+-define(PAGINATION_PAGE_SIZE
+        ,whapps_config:get_integer(?CONFIG_CAT
+                                   ,<<"pagination_page_size">>
+                                   ,50
+                                  )
+       ).
 
 -type direction() :: 'ascending' | 'descending'.
 
+-type view_options() :: couch_util:view_options() |
+                        [{'databases', ne_binaries()}].
+
+
 -record(load_view_params, {view :: api_binary()
-                           ,view_options = [] :: wh_proplist()
+                           ,view_options = [] :: view_options()
                            ,context :: cb_context:context()
                            ,start_key :: wh_json:json_term()
                            ,page_size :: non_neg_integer() | api_binary()
@@ -1040,7 +1048,10 @@ add_pvt_vsn(JObj, _) ->
 add_pvt_account_db(JObj, Context) ->
     case wh_json:get_value(<<"pvt_account_db">>, JObj) of
         'undefined' ->
-            wh_json:set_value(<<"pvt_account_db">>, cb_context:account_db(Context), JObj);
+            case cb_context:account_db(Context) of
+                'undefined' -> JObj;
+                AccountDb -> wh_json:set_value(<<"pvt_account_db">>, AccountDb, JObj)
+            end;
         _Else -> JObj
     end.
 
@@ -1048,7 +1059,10 @@ add_pvt_account_db(JObj, Context) ->
 add_pvt_account_id(JObj, Context) ->
     case wh_json:get_value(<<"pvt_account_id">>, JObj) of
         'undefined' ->
-            wh_json:set_value(<<"pvt_account_id">>, cb_context:account_id(Context), JObj);
+            case cb_context:account_id(Context) of
+                'undefined' -> JObj;
+                AccountId -> wh_json:set_value(<<"pvt_account_id">>, AccountId, JObj)
+            end;
         _Else -> JObj
     end.
 

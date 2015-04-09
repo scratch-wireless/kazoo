@@ -211,7 +211,11 @@ handle_cast('maybe_start_recording', #state{is_recording='false'
                                             ,sample_rate = SampleRate
                                            }=State) ->
     start_recording(Call, MediaName, TimeLimit, <<"wh_media_recording">>, SampleRate),
-    {'noreply', State};
+    {'noreply', State#state{
+                  channel_status_ref=start_check_call_timer()
+                  ,time_limit_ref=start_time_limit_timer(TimeLimit)
+                 }
+    };
 handle_cast('maybe_start_recording', #state{is_recording='false'
                                             ,record_on_answer='true'
                                             ,call=Call
@@ -244,7 +248,11 @@ handle_cast('maybe_start_recording_on_answer', #state{is_recording='false'
                                                       ,sample_rate = SampleRate
                                                      }=State) ->
     start_recording(Call, MediaName, TimeLimit, <<"wh_media_recording">>, SampleRate),
-    {'noreply', State};
+    {'noreply', State#state{
+                  channel_status_ref=start_check_call_timer()
+                  ,time_limit_ref=start_time_limit_timer(TimeLimit)
+                 }
+    };
 handle_cast('stop_call', #state{store_attempted='true'}=State) ->
     lager:debug("we've already sent a store attempt, waiting to hear back"),
     {'noreply', State};
@@ -331,14 +339,14 @@ handle_info('stop_recording', #state{media_name=MediaName
                                     }=State) ->
     lager:debug("recv stop_recording event"),
     maybe_stop_timer(TLRef),
-    whapps_call_command:record_call([{<<"Media-Name">>, MediaName}], <<"stop">>, Call),
+    whapps_call_command:stop_record_call([{<<"Media-Name">>, MediaName}], Call),
     {'noreply', State};
 handle_info({'timeout', TLRef, 'stop_recording'}, #state{media_name=MediaName
                                                          ,call=Call
                                                          ,time_limit_ref=TLRef
                                                         }=State) ->
     lager:debug("recv stop_recording timer, forcing recording to stop"),
-    whapps_call_command:record_call([{<<"Media-Name">>, MediaName}], <<"stop">>, Call),
+    whapps_call_command:stop_record_call([{<<"Media-Name">>, MediaName}], Call),
     {'noreply', State};
 handle_info({'check_call', Ref}, #state{call=Call
                                         ,channel_status_ref=Ref
@@ -420,7 +428,7 @@ get_timelimit(TL) ->
     end.
 
 -spec get_format(api_binary()) -> ne_binary().
-get_format('undefined') -> whapps_config:get(?WHS_CONFIG_CAT, [<<"call_recording">>, <<"extension">>], <<"mp3">>);
+get_format('undefined') -> whapps_config:get(?WHM_CONFIG_CAT, [<<"call_recording">>, <<"extension">>], <<"mp3">>);
 get_format(<<"mp3">> = MP3) -> MP3;
 get_format(<<"wav">> = WAV) -> WAV;
 get_format(_) -> get_format('undefined').
@@ -475,34 +483,32 @@ store_url(Call, JObj) ->
     {'ok', URL} = wh_media_url:store(AccountDb, MediaId, MediaName),
     URL.
 
--type store_url() :: 'false' | {'true', 'local' | 'third_party'} | {'true', 'other', ne_binary()}.
+-type store_url() :: 'false' | {'true', 'local'} | {'true', 'other', ne_binary()}.
 
 -spec should_store_recording(api_binary()) -> store_url().
-should_store_recording('undefined') ->
-    case whapps_config:get_is_true(?CONFIG_CAT, <<"store_recordings">>, 'false') of
-        'true' -> {'true', 'local'};
-        'false' -> 'false'
-    end;
 should_store_recording(Url) ->
     case wh_util:is_empty(Url) of
-        'true' -> {'true', 'third_party'};
+        'true' ->
+            case whapps_config:get_is_true(?CONFIG_CAT, <<"store_recordings">>, 'false') of
+                'true' -> {'true', 'local'};
+                'false' -> 'false'
+            end;
         'false' -> {'true', 'other', Url}
     end.
 
 -spec save_recording(whapps_call:call(), ne_binary(), ne_binary(), store_url()) -> 'ok'.
-save_recording(_Call, _MediaName, _Format, 'false') ->
-    lager:debug("not configured to store recording ~s", [_MediaName]);
+save_recording(Call, MediaName, Format, 'false') ->
+    lager:debug("not configured to store recording ~s", [MediaName]),
+    case whapps_config:get_ne_binary(?CONFIG_CAT, <<"third_party_bigcouch_host">>) of
+        'undefined' -> lager:debug("no URL for call recording provided, third_party_bigcouch_host undefined");
+        BCHost -> store_recording_to_third_party_bigcouch(Call, MediaName, Format, BCHost)
+    end;
 save_recording(Call, MediaName, Format, {'true', 'local'}) ->
     {'ok', MediaJObj} = store_recording_meta(Call, MediaName, Format),
     lager:info("stored meta: ~p", [MediaJObj]),
     StoreUrl = store_url(Call, MediaJObj),
     lager:info("store local url: ~s", [StoreUrl]),
     store_recording(MediaName, StoreUrl, Call);
-save_recording(Call, MediaName, Format, {'true', 'third_party'}) ->
-    case whapps_config:get_ne_binary(?CONFIG_CAT, <<"third_party_bigcouch_host">>) of
-        'undefined' -> lager:debug("no URL for call recording provided, third_party_bigcouch_host undefined");
-        BCHost -> store_recording_to_third_party_bigcouch(Call, MediaName, Format, BCHost)
-    end;
 save_recording(Call, MediaName, _Format, {'true', 'other', Url}) ->
     lager:info("store remote url: ~s", [Url]),
     store_recording(MediaName, Url, Call).
@@ -565,11 +571,11 @@ start_recording(Call, MediaName, TimeLimit, SampleRate) ->
     Props = [{<<"Media-Name">>, MediaName}
              ,{<<"Record-Sample-Rate">>, SampleRate}
             ],
-    whapps_call_command:record_call(Props, <<"start">>, TimeLimit, Call).
+    whapps_call_command:start_record_call(Props, TimeLimit, Call).
 start_recording(Call, MediaName, TimeLimit, MediaRecorder, SampleRate) ->
     lager:debug("starting recording of ~s", [MediaName]),
     Call1 = whapps_call:set_custom_channel_var(<<"Media-Recorder">>, MediaRecorder, Call),
     Props = [{<<"Media-Name">>, MediaName}
              ,{<<"Record-Sample-Rate">>, SampleRate}
             ],
-    whapps_call_command:record_call(Props, <<"start">>, TimeLimit, Call1).
+    whapps_call_command:start_record_call(Props, TimeLimit, Call1).

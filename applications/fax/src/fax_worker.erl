@@ -339,6 +339,10 @@ handle_cast(_Msg, State) ->
 handle_info('job_timeout', #state{job=JObj}=State) ->
     release_failed_job('job_timeout', 'undefined', JObj),
     {'noreply', reset(State)};
+handle_info({'EXIT', _, 'normal'}, State) ->
+    {'noreply', State};
+handle_info({'EXIT', _, 'shutdown'}, State) ->
+    {'noreply', State};
 handle_info(_Info, State) ->
     lager:debug("fax worker unhandled message: ~p", [_Info]),
     {'noreply', State}.
@@ -389,7 +393,7 @@ code_change(_OldVsn, State, _Extra) ->
                                     {'ok', wh_json:object()} |
                                     {'error', term()}.
 attempt_to_acquire_job(Id, Q) ->
-    case couch_mgr:open_doc(?WH_FAXES, Id) of
+    case couch_mgr:open_doc(?WH_FAXES_DB, Id) of
         {'error', _}=E -> E;
         {'ok', JObj} ->
             attempt_to_acquire_job(wh_json:set_value(<<"pvt_queue">>, Q, JObj))
@@ -398,7 +402,7 @@ attempt_to_acquire_job(Id, Q) ->
 attempt_to_acquire_job(JObj) ->
     case wh_json:get_value(<<"pvt_job_status">>, JObj) of
         <<"pending">> ->
-            couch_mgr:save_doc(?WH_FAXES
+            couch_mgr:save_doc(?WH_FAXES_DB
                                ,wh_json:set_values([{<<"pvt_job_status">>, <<"processing">>}
                                                     ,{<<"pvt_job_node">>, wh_util:to_binary(node())}
                                                     ,{<<"pvt_modified">>, wh_util:current_tstamp()}
@@ -499,7 +503,7 @@ release_failed_job('fax_result', Resp, JObj) ->
     release_job(Result, JObj, Resp);
 release_failed_job('job_timeout', _Error, JObj) ->
     Result = [{<<"success">>, 'false'}
-              ,{<<"result_code">>, 0}
+              ,{<<"result_code">>, 500}
               ,{<<"result_text">>, <<"fax job timed out">>}
               ,{<<"pages_sent">>, 0}
               ,{<<"time_elapsed">>, elapsed_time(JObj)}
@@ -558,7 +562,7 @@ release_job(Result, JObj, Resp) ->
                  end
                ],
     Update = lists:foldr(fun(F, J) -> F(J) end, JObj, Updaters),
-    couch_mgr:ensure_saved(?WH_FAXES, Update),
+    couch_mgr:ensure_saved(?WH_FAXES_DB, Update),
     maybe_notify(Result, JObj, Resp, wh_json:get_value(<<"pvt_job_status">>, Update)),
     case Success of 'true' -> 'ok'; 'false' -> 'failure' end.
 
@@ -645,6 +649,7 @@ notify_fields(JObj, Resp) ->
        ,{<<"Callee-ID-Number">>, ToNumber}
        ,{<<"Callee-ID-Name">>, ToName }
        ,{<<"Account-ID">>, wh_json:get_value(<<"pvt_account_id">>, JObj)}
+       ,{<<"Account-DB">>, wh_json:get_value(<<"pvt_account_db">>, JObj)}
        ,{<<"Fax-JobId">>, wh_json:get_value(<<"_id">>, JObj)}
        ,{<<"Fax-ID">>, wh_json:get_value(<<"_id">>, JObj)}
        ,{<<"FaxBox-ID">>, wh_json:get_value(<<"faxbox_id">>, JObj)}
@@ -690,7 +695,7 @@ fetch_document_from_attachment(JObj, [AttachmentName|_]) ->
                   end,
 
     Props = [{"Content-Type", ContentType}],
-    {'ok', Contents} = couch_mgr:fetch_attachment(?WH_FAXES, JobId, AttachmentName),
+    {'ok', Contents} = couch_mgr:fetch_attachment(?WH_FAXES_DB, JobId, AttachmentName),
     {'ok', "200", Props, Contents}.
 
 -spec fetch_document_from_url(wh_json:object()) ->
@@ -784,12 +789,15 @@ send_fax(JobId, JObj, Q, ToDID) ->
     ToName = wh_util:to_binary(wh_json:get_value(<<"to_name">>, JObj, ToNumber)),
     CallId = wh_util:rand_hex_binary(8),
     ETimeout = wh_util:to_binary(whapps_config:get_integer(?CONFIG_CAT, <<"endpoint_timeout">>, 10)),
+    AccountId =  wh_json:get_value(<<"pvt_account_id">>, JObj),
+    AccountRealm = wh_util:get_account_realm(AccountId),
     Request = props:filter_undefined(
                 [{<<"Outbound-Caller-ID-Name">>, wh_json:get_value(<<"from_name">>, JObj)}
                  ,{<<"Outbound-Caller-ID-Number">>, wh_json:get_value(<<"from_number">>, JObj)}
                  ,{<<"Outbound-Callee-ID-Number">>, ToNumber}
                  ,{<<"Outbound-Callee-ID-Name">>, ToName }
-                 ,{<<"Account-ID">>, wh_json:get_value(<<"pvt_account_id">>, JObj)}
+                 ,{<<"Account-ID">>, AccountId}
+                 ,{<<"Account-Realm">>, AccountRealm}
                  ,{<<"To-DID">>, ToDID}
                  ,{<<"Fax-Identity-Number">>, wh_json:get_value(<<"fax_identity_number">>, JObj)}
                  ,{<<"Fax-Identity-Name">>, wh_json:get_value(<<"fax_identity_name">>, JObj)}

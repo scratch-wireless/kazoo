@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%%% @copyright (C) 2012-2015, 2600Hz INC
+%%% @copyright (C) 2012-2013, 2600Hz INC
 %%% @doc
 %%%
 %%% Common functions for the provisioner modules
@@ -106,8 +106,8 @@ maybe_provision(_Context, _Status) -> 'false'.
 -spec maybe_provision_v5(cb_context:context(), ne_binary()) -> 'ok'.
 maybe_provision_v5(Context, ?HTTP_PUT) ->
     JObj = cb_context:doc(Context),
-    AuthToken = cb_context:auth_token(Context),
-    _ = spawn('provisioner_v5', 'put', [JObj, AuthToken]),
+    AuthToken =  cb_context:auth_token(Context),
+    _ = spawn('provisioner_v5', 'update_device', [JObj, AuthToken]),
     'ok';
 maybe_provision_v5(Context, ?HTTP_POST) ->
     JObj = cb_context:doc(Context),
@@ -116,11 +116,11 @@ maybe_provision_v5(Context, ?HTTP_POST) ->
     OldAddress = wh_json:get_ne_value(<<"mac_address">>, cb_context:fetch(Context, 'db_doc')),
     case NewAddress =:= OldAddress of
         'true' ->
-            _ = spawn('provisioner_v5', 'post', [JObj, AuthToken]);
+            _ = spawn('provisioner_v5', 'update_device', [JObj, AuthToken]);
         'false' ->
             JObj1 = wh_json:set_value(<<"mac_address">>, OldAddress, JObj),
-            _ = spawn('provisioner_v5', 'delete', [JObj1, AuthToken]),
-            _ = spawn('provisioner_v5', 'put', [JObj, AuthToken])
+            _ = spawn('provisioner_v5', 'delete_device', [JObj1, AuthToken]),
+            _ = spawn('provisioner_v5', 'update_device', [JObj, AuthToken])
     end,
     'ok'.
 
@@ -144,9 +144,9 @@ maybe_delete_provision(Context, 'success') ->
             _ = spawn(?MODULE, 'delete_full_provision', [MACAddress, Context]),
             'true';
         <<"provisioner_v5">>  ->
-            _ = spawn('provisioner_v5', 'delete', [cb_context:doc(Context)
-                                                   ,cb_context:auth_token(Context)
-                                                  ]),
+            _ = spawn('provisioner_v5', 'delete_device', [cb_context:doc(Context)
+                                                          ,cb_context:auth_token(Context)
+                                                         ]),
             'true';
         _ ->
             'false'
@@ -202,9 +202,15 @@ maybe_delete_account(Context) ->
 maybe_send_contact_list(Context) ->
     maybe_send_contact_list(Context, cb_context:resp_status(Context)).
 maybe_send_contact_list(Context, 'success') ->
-    _ = case get_provisioning_type() of
+    _ = case cb_context:is_context(Context)
+            andalso get_provisioning_type()
+        of
             <<"super_awesome_provisioner">> ->
                 spawn(fun() -> do_full_provision_contact_list(Context) end);
+            <<"provisioner_v5">> ->
+                spawn('provisioner_v5', 'update_user', [cb_context:account_id(Context)
+                                                        ,cb_context:doc(Context)
+                                                        ,cb_context:auth_token(Context)]);
             _ -> 'ok'
         end,
     Context;

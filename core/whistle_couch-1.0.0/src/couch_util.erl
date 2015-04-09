@@ -1,5 +1,5 @@
 %%%-----------------------------------------------------------------------------
-%%% @copyright (C) 2011-2014, 2600Hz
+%%% @copyright (C) 2011-2015, 2600Hz
 %%% @doc
 %%% Util functions used by whistle_couch
 %%% @end
@@ -9,6 +9,10 @@
 -module(couch_util).
 
 -export([db_classification/1]).
+-export([archive/1
+         ,archive/2
+        ]).
+
 -export([get_new_connection/4
          ,get_db/2
          ,server_url/1
@@ -71,6 +75,7 @@
 -export([max_bulk_insert/0]).
 
 -include_lib("wh_couch.hrl").
+-include_lib("whistle_number_manager/include/wh_number_manager.hrl").
 
 %% Throttle how many docs we bulk insert to BigCouch
 -define(MAX_BULK_INSERT, 2000).
@@ -82,11 +87,12 @@
 
 -type db_classifications() :: 'account' | 'modb' | 'acdc' |
                               'numbers' | 'aggregate' | 'system' |
-                              'depreciated' | 'undefined'.
+                              'deprecated' | 'undefined'.
 
 -export_type([db_create_options/0
               ,couchbeam_errors/0
               ,db_classifications/0
+              ,view_options/0
              ]).
 
 -define(DELETE_KEYS, [<<"_rev">>, <<"id">>, <<"_attachments">>]).
@@ -105,41 +111,112 @@
 db_classification(Db) when not is_binary(Db) ->
     db_classification(wh_util:to_binary(Db));
 db_classification(<<"ts">>) -> 'depreciated';
-db_classification(<<"crossbar_schemas">>) -> 'depreciated';
-db_classification(<<"registrations">>) -> 'depreciated';
-db_classification(<<"crossbar%2Fsessions">>) -> 'depreciated';
-db_classification(<<"signups">>) -> 'system'; %% Soon to be depreciated
-db_classification(<<"gloabl_provisioner">>) -> 'system'; %% Soon to be depreciated
-db_classification(<<"accounts">>) -> 'aggregate';
-db_classification(<<"token_auth">>) -> 'aggregate';
-db_classification(<<"sip_auth">>) -> 'aggregate';
-db_classification(<<"faxes">>) -> 'aggregate';
-db_classification(<<"sms">>) -> 'aggregate';
-db_classification(<<"acdc">>) -> 'aggregate';
-db_classification(<<"services">>) -> 'aggregate';
-db_classification(<<"port_requests">>) -> 'aggregate';
-db_classification(<<"webhooks">>) -> 'aggregate';
-db_classification(<<"nubmers/", _Prefix:5/binary>>) -> 'numbers';
-db_classification(<<"nubmers%2F", _Prefix:5/binary>>) -> 'numbers';
-db_classification(<<"nubmers%2f", _Prefix:5/binary>>) -> 'numbers';
+db_classification(<<"crossbar_schemas">>) -> 'deprecated';
+db_classification(<<"registrations">>) -> 'deprecated';
+db_classification(<<"crossbar%2Fsessions">>) -> 'deprecated';
+db_classification(<<"sms">>) -> 'deprecated';
+db_classification(<<"signups">>) -> 'system'; %% Soon to be deprecated
+db_classification(?WH_PROVISIONER_DB) -> 'system'; %% Soon to be deprecated
+db_classification(?WH_ACCOUNTS_DB) -> 'aggregate';
+db_classification(?KZ_TOKEN_DB) -> 'aggregate';
+db_classification(?WH_SIP_DB) -> 'aggregate';
+db_classification(?WH_FAXES_DB) -> 'aggregate';
+db_classification(?KZ_ACDC_DB) -> 'aggregate';
+db_classification(?WH_SERVICES_DB) -> 'aggregate';
+db_classification(?KZ_PORT_REQUESTS_DB) -> 'aggregate';
+db_classification(?KZ_WEBHOOKS_DB) -> 'aggregate';
+db_classification(<<?WNM_DB_PREFIX_L, _Prefix:5/binary>>) -> 'numbers';
+db_classification(<<"numbers%2F", _Prefix:5/binary>>) -> 'numbers';
+db_classification(<<"numbers%2f", _Prefix:5/binary>>) -> 'numbers';
 db_classification(<<"account/", _AccountId:34/binary, "-", _Date:6/binary>>) -> 'modb';
 db_classification(<<"account%2F", _AccountId:38/binary, "-", _Date:6/binary>>) -> 'modb';
 db_classification(<<"account%2f", _AccountId:38/binary, "-", _Date:6/binary>>) -> 'modb';
 db_classification(<<"account/", _AccountId:34/binary>>) -> 'account';
 db_classification(<<"account%2f", _AccountId:38/binary>>) -> 'account';
 db_classification(<<"account%2F", _AccountId:38/binary>>) -> 'account';
-db_classification(<<"ratedeck">>) -> 'system';
-db_classification(<<"offnet">>) -> 'system';
-db_classification(<<"anonymous_cds">>) -> 'system';
-db_classification(<<"dedicated_ips">>) -> 'system';
-db_classification(<<"system_config">>) -> 'system';
-db_classification(<<"system_media">>) -> 'system';
-db_classification(<<"system_schemas">>) -> 'system';
-db_classification(Database) ->
-    case lists:member(Database, ?KZ_SYSTEM_DBS) of
-        'true' -> 'system';
-        'false' -> 'undefined'
+db_classification(?WH_RATES_DB) -> 'system';
+db_classification(?WH_OFFNET_DB) -> 'system';
+db_classification(?WH_ANONYMOUS_CDR_DB) -> 'system';
+db_classification(?WH_DEDICATED_IP_DB) -> 'system';
+db_classification(?WH_CONFIG_DB) -> 'system';
+db_classification(?WH_MEDIA_DB) -> 'system';
+db_classification(?WH_SCHEMA_DB) -> 'system';
+db_classification(?KZ_OAUTH_DB) -> 'system';
+db_classification(_Database) ->
+    lager:debug("unknown type for database ~s", [_Database]),
+    'undefined'.
+
+%%------------------------------------------------------------------------------
+%% @public
+%% @doc
+%%
+%% @end
+%%------------------------------------------------------------------------------
+-spec archive(ne_binary()) -> 'ok'.
+-spec archive(ne_binary(), ne_binary()) -> 'ok'.
+archive(Db) ->
+    Folder = whapps_config:get(?CONFIG_CAT, <<"default_archive_folder">>, <<"/tmp">>),
+    archive(Db, filename:join([<<Folder/binary, "/", Db/binary, ".json">>])).
+
+archive(Db, Filename) ->
+    {'ok', DbInfo} = couch_mgr:db_info(Db),
+    {'ok', File} = file:open(Filename, ['write']),
+    'ok' = file:write(File, <<"[">>),
+    io:format("archiving to ~s~n", [Filename]),
+    MaxDocs = whapps_config:get_integer(?CONFIG_CAT, <<"max_concurrent_docs_to_archive">>, 500),
+    archive(Db, File, MaxDocs, wh_json:get_integer_value(<<"doc_count">>, DbInfo), 0),
+    'ok' = file:write(File, <<"]">>),
+    file:close(File).
+
+%% MaxDocs = The biggest set of docs to pull from Couch
+%% N = The number of docs in the DB that haven't been archived
+%% Pos = Which doc will the next query start from (the offset)
+-spec archive(ne_binary(), file:io_device(), pos_integer(), non_neg_integer(), non_neg_integer()) -> 'ok'.
+archive(Db, _File,  _MaxDocs, 0, _Pos) ->
+    io:format("    archive ~s complete~n", [Db]);
+archive(Db, File, MaxDocs, N, Pos) when N =< MaxDocs ->
+    ViewOptions = [{'limit', N}
+                   ,{'skip', Pos}
+                   ,'include_docs'
+                  ],
+    case couch_mgr:all_docs(Db, ViewOptions) of
+        {'ok', []} -> io:format("    no docs left after pos ~p~n", [Pos]);
+        {'ok', Docs} ->
+            'ok' = archive_docs(File, Docs),
+            io:format("    archived ~p docs~n", [N]);
+        {'error', _E} ->
+            io:format("    error ~p asking for ~p docs from pos ~p~n"
+                      ,[_E, N, Pos]
+                     ),
+            timer:sleep(500),
+            archive(Db, File, MaxDocs, N, Pos)
+    end;
+archive(Db, File, MaxDocs, N, Pos) ->
+    ViewOptions = [{'limit', MaxDocs}
+                   ,{'skip', Pos}
+                   ,'include_docs'
+                  ],
+    case couch_mgr:all_docs(Db, ViewOptions) of
+        {'ok', []} -> io:format("    no docs left after pos ~p~n", [Pos]);
+        {'ok', Docs} ->
+            'ok' = archive_docs(File, Docs),
+            io:format("    archived ~p docs~n", [MaxDocs]),
+            archive(Db, File, MaxDocs, N - MaxDocs, Pos + MaxDocs);
+        {'error', _E} ->
+            io:format("    error ~p asking for ~p docs from pos ~p~n"
+                      ,[_E, N, Pos]
+                     ),
+            timer:sleep(500),
+            archive(Db, File, MaxDocs, N, Pos)
     end.
+
+-spec archive_docs(file:io_device(), wh_json:objects()) -> 'ok'.
+archive_docs(_, []) -> 'ok';
+archive_docs(File, [Doc]) ->
+    'ok' = file:write(File, [wh_json:encode(Doc), $\n]);
+archive_docs(File, [Doc|Docs]) ->
+    'ok' = file:write(File, [wh_json:encode(Doc), $,, $\n]),
+    archive_docs(File, Docs).
 
 %%------------------------------------------------------------------------------
 %% @public
@@ -320,7 +397,7 @@ all_docs(#server{}=Conn, DbName, Options) ->
     do_fetch_results(Db, 'all_docs', Options).
 
 -spec get_results(server(), ne_binary(), ne_binary(), view_options()) ->
-                         {'ok', wh_json:objects() | ne_binaries()} |
+                         {'ok', wh_json:objects() | wh_json:keys()} |
                          couchbeam_error().
 get_results(#server{}=Conn, DbName, DesignDoc, ViewOptions) ->
     Db = get_db(Conn, DbName),

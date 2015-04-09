@@ -265,7 +265,7 @@ maybe_get_assigned_number(_, Name, Call) ->
                        || Num <- wh_json:get_keys(PublicJObj)
                               ,Num =/= <<"id">>
                               ,(not wh_json:is_true([Num, <<"on_subaccount">>], JObj))
-                              ,(wh_json:get_value([Num, <<"state">>], JObj) =:= <<"in_service">>)
+                              ,(wh_json:get_value([Num, <<"state">>], JObj) =:= ?NUMBER_STATE_AVAILABLE)
                       ],
             maybe_get_assigned_numbers(Numbers, Name, Call)
     end.
@@ -354,7 +354,6 @@ moh_attributes(EndpointId, Attribute, Call) when is_binary(EndpointId) ->
 moh_attributes(Endpoint, Attribute, Call) ->
     Value = wh_json:get_ne_value([<<"music_on_hold">>, Attribute], Endpoint),
     maybe_normalize_moh_attribute(Value, Attribute, Call).
-
 
 -spec maybe_normalize_moh_attribute(api_binary(), ne_binary(), whapps_call:call()) -> api_binary().
 maybe_normalize_moh_attribute('undefined', _, _) -> 'undefined';

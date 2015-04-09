@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%%% @copyright (C) 2011-2014, 2600Hz INC
+%%% @copyright (C) 2011-2015, 2600Hz INC
 %%% @doc
 %%%
 %%% @end
@@ -274,13 +274,12 @@ do_post(Context) ->
     end.
 
 post(Context, Id, ?PREVIEW) ->
-    Preview = build_preview_payload(Context),
-
+    Notification = cb_context:doc(Context),
+    Preview = build_preview_payload(Context, Notification),
     {API, _} = lists:foldl(fun preview_fold/2
-                           ,{Preview, cb_context:doc(Context)}
-                           ,wapi_notifications:headers(Id)
+                           ,{Preview, Notification}
+                           ,headers(Id)
                           ),
-
     case wh_amqp_worker:call(API
                              ,publish_fun(Id)
                              ,fun wapi_notifications:notify_update_v/1
@@ -294,9 +293,8 @@ post(Context, Id, ?PREVIEW) ->
             crossbar_util:response('error', <<"Failed to process notification preview">>, Context)
     end.
 
--spec build_preview_payload(cb_context:context()) -> wh_proplist().
-build_preview_payload(Context) ->
-    Notification = cb_context:doc(Context),
+-spec build_preview_payload(cb_context:context(), wh_json:object()) -> wh_proplist().
+build_preview_payload(Context, Notification) ->
     props:filter_empty(
       [{<<"To">>, wh_json:get_value(<<"to">>, Notification)}
        ,{<<"From">>, wh_json:get_value(<<"from">>, Notification)}
@@ -328,6 +326,12 @@ handle_preview_response(Context, Resp) ->
             crossbar_util:response_202(<<"Notification processing">>, Context)
     end.
 
+-spec headers(ne_binary()) -> wh_proplist().
+headers(<<"voicemail_to_email">>) ->
+    wapi_notifications:headers(<<"voicemail">>);
+headers(Id) ->
+    wapi_notifications:headers(Id).
+
 -spec publish_fun(ne_binary()) -> fun((api_terms()) -> 'ok').
 publish_fun(<<"voicemail_to_email">>) ->
     fun wapi_notifications:publish_voicemail/1;
@@ -335,16 +339,38 @@ publish_fun(<<"voicemail_full">>) ->
     fun wapi_notifications:publish_voicemail_full/1;
 publish_fun(<<"fax_inbound_to_email">>) ->
     fun wapi_notifications:publish_fax_inbound/1;
+publish_fun(<<"fax_inbound_error_to_email">>) ->
+    fun wapi_notifications:publish_fax_inbound_error/1;
 publish_fun(<<"fax_outbound_to_email">>) ->
     fun wapi_notifications:publish_fax_outbound/1;
+publish_fun(<<"fax_outbound_error_to_email">>) ->
+    fun wapi_notifications:publish_fax_outbound_error/1;
+publish_fun(<<"low_balance">>) ->
+    fun wapi_notifications:publish_low_balance/1;
 publish_fun(<<"new_account">>) ->
     fun wapi_notifications:publish_new_account/1;
 publish_fun(<<"new_user">>) ->
     fun wapi_notifications:publish_new_user/1;
 publish_fun(<<"deregister">>) ->
     fun wapi_notifications:publish_deregister/1;
+publish_fun(<<"transaction">>) ->
+    fun wapi_notifications:publish_transaction/1;
 publish_fun(<<"password_recovery">>) ->
     fun wapi_notifications:publish_pwd_recovery/1;
+publish_fun(<<"system_alert">>) ->
+    fun wapi_notifications:publish_system_alert/1;
+publish_fun(<<"cnam_request">>) ->
+    fun wapi_notifications:publish_cnam_request/1;
+publish_fun(<<"topup">>) ->
+    fun wapi_notifications:publish_topup/1;
+publish_fun(<<"port_request">>) ->
+    fun wapi_notifications:publish_port_request/1;
+publish_fun(<<"port_scheduled">>) ->
+    fun wapi_notifications:publish_port_scheduled/1;
+publish_fun(<<"port_cancel">>) ->
+    fun wapi_notifications:publish_port_cancel/1;
+publish_fun(<<"ported">>) ->
+    fun wapi_notifications:publish_ported/1;
 publish_fun(_Id) ->
     lager:debug("no wapi_notification:publish_~s/1 defined", [_Id]),
     fun(_Any) -> 'ok' end.
@@ -353,8 +379,10 @@ publish_fun(_Id) ->
                           {wh_proplist(), wh_json:object()}.
 preview_fold(Header, {Props, ReqData}) ->
     case wh_json:get_first_defined([Header, wh_json:normalize_key(Header)], ReqData) of
-        'undefined' -> {props:insert_value(Header, Header, Props), ReqData};
-        V -> {props:set_value(Header, V, Props), ReqData}
+        'undefined' ->
+            {props:insert_value(Header, Header, Props), ReqData};
+        V ->
+            {props:set_value(Header, V, Props), ReqData}
     end.
 
 %%--------------------------------------------------------------------
@@ -403,10 +431,10 @@ maybe_delete_template(Context, Id, ContentType, TemplateJObj) ->
         'undefined' ->
             lager:debug("failed to find attachment ~s", [AttachmentName]),
             cb_context:add_system_error(
-                'bad_identifier'
-                ,wh_json:from_list([{<<"cause">>, ContentType}])
-                , Context
-            );
+              'bad_identifier'
+              ,wh_json:from_list([{<<"cause">>, ContentType}])
+              , Context
+             );
         _Attachment ->
             lager:debug("attempting to delete attachment ~s", [AttachmentName]),
             crossbar_doc:delete_attachment(kz_notification:db_id(Id), AttachmentName, Context)
@@ -936,7 +964,7 @@ on_successful_validation(Id, Context) ->
     end.
 
 -spec handle_missing_account_notification(cb_context:context(), ne_binary(), wh_proplist()) -> cb_context:context().
-handle_missing_account_notification(Context, Id, [{<<"notifications">>, [Id ,<<"preview">>]}|_]) ->
+handle_missing_account_notification(Context, Id, [{<<"notifications">>, [Id, ?PREVIEW]}|_]) ->
     lager:debug("preview request, ignoring if notification ~s is missing", [Id]),
     on_successful_validation(Id, Context);
 handle_missing_account_notification(Context, Id, _ReqNouns) ->

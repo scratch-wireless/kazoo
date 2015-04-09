@@ -24,6 +24,9 @@
          ,bind/2
 
          ,range_view_options/1, range_view_options/2
+
+         ,range_modb_view_options/1, range_modb_view_options/2, range_modb_view_options/3
+         ,range_modbs/3
         ]).
 
 -include("../crossbar.hrl").
@@ -74,6 +77,57 @@ range_view_options(Context, MaxRange) ->
             );
         _N -> {CreatedFrom, CreatedTo}
     end.
+
+-spec range_modb_view_options(cb_context:context()) ->
+                                     {'ok', wh_proplist()} |
+                                     cb_context:context().
+range_modb_view_options(Context) ->
+    range_modb_view_options(Context, 'undefined', 'undefined').
+
+-spec range_modb_view_options(cb_context:context(), api_binaries()) ->
+                                     {'ok', wh_proplist()} |
+                                     cb_context:context().
+range_modb_view_options(Context, PrefixKeys) ->
+    range_modb_view_options(Context, PrefixKeys, 'undefined').
+
+-spec range_modb_view_options(cb_context:context(), api_binaries(), api_binaries()) ->
+                                     {'ok', crossbar_doc:view_options()} |
+                                     cb_context:context().
+range_modb_view_options(Context, 'undefined', SuffixKeys) ->
+    range_modb_view_options(Context, [], SuffixKeys);
+range_modb_view_options(Context, PrefixKeys, 'undefined') ->
+    range_modb_view_options(Context, PrefixKeys, []);
+range_modb_view_options(Context, PrefixKeys, SuffixKeys) ->
+    case cb_modules_util:range_view_options(Context) of
+        {CreatedFrom, CreatedTo} ->
+            case PrefixKeys =:= [] andalso SuffixKeys =:= [] of
+                'true' -> {'ok', [{'startkey', CreatedFrom}
+                                  ,{'endkey', CreatedTo}
+                                  | range_modbs(Context, CreatedFrom, CreatedTo)
+                                 ]};
+                'false' -> {'ok', [{'startkey', [Key || Key <- PrefixKeys ++ [CreatedFrom] ++ SuffixKeys] }
+                                   ,{'endkey', [Key || Key <- PrefixKeys  ++ [CreatedTo]   ++ SuffixKeys] }
+                                   | range_modbs(Context, CreatedFrom, CreatedTo)
+                                  ]}
+            end;
+        Context1 -> Context1
+    end.
+
+-spec range_modbs(cb_context:context(), pos_integer(), pos_integer()) ->
+                         [{'databases', ne_binaries()}].
+range_modbs(Context, From, To) ->
+    AccountId = cb_context:account_id(Context),
+    {{FromYear, FromMonth, _}, _} = calendar:gregorian_seconds_to_datetime(From),
+    {{ToYear, ToMonth, _}, _} = calendar:gregorian_seconds_to_datetime(To),
+
+    [{'databases', [wh_util:format_account_mod_id(AccountId, Year, Month)
+                    || {Year, Month} <- crossbar_util:generate_year_month_sequence({FromYear, FromMonth}
+                                                                                   ,{ToYear, ToMonth}
+                                                                                   ,[]
+                                                                                  )
+                   ]
+     }
+    ].
 
 -spec created_to(cb_context:context(), pos_integer()) -> pos_integer().
 created_to(Context, TStamp) ->
@@ -249,6 +303,7 @@ default_bleg_cid(Call, Context) ->
 
 -spec originate_quickcall(wh_json:objects(), whapps_call:call(), cb_context:context()) -> cb_context:context().
 originate_quickcall(Endpoints, Call, Context) ->
+    AutoAnswer = wh_json:is_true(<<"auto_answer">>, cb_context:query_string(Context), 'true'),
     CCVs = [{<<"Account-ID">>, cb_context:account_id(Context)}
             ,{<<"Retain-CID">>, <<"true">>}
             ,{<<"Inherit-Codec">>, <<"false">>}
@@ -262,7 +317,7 @@ originate_quickcall(Endpoints, Call, Context) ->
     Request = [{<<"Application-Name">>, <<"transfer">>}
                ,{<<"Application-Data">>, get_application_data(Context)}
                ,{<<"Msg-ID">>, MsgId}
-               ,{<<"Endpoints">>, maybe_auto_answer(Endpoints)}
+               ,{<<"Endpoints">>, maybe_auto_answer(Endpoints, AutoAnswer)}
                ,{<<"Timeout">>, get_timeout(Context)}
                ,{<<"Ignore-Early-Media">>, get_ignore_early_media(Context)}
                ,{<<"Media">>, get_media(Context)}
@@ -279,10 +334,10 @@ originate_quickcall(Endpoints, Call, Context) ->
     wapi_resource:publish_originate_req(props:filter_undefined(Request)),
     crossbar_util:response_202(<<"processing request">>, cb_context:set_resp_data(Context, Request)).
 
--spec maybe_auto_answer(wh_json:objects()) -> wh_json:objects().
-maybe_auto_answer([Endpoint]) ->
-    [wh_json:set_value([<<"Custom-Channel-Vars">>, <<"Auto-Answer">>], 'true', Endpoint)];
-maybe_auto_answer(Endpoints) ->
+-spec maybe_auto_answer(wh_json:objects(), boolean()) -> wh_json:objects().
+maybe_auto_answer([Endpoint], AutoAnswer) ->
+    [wh_json:set_value([<<"Custom-Channel-Vars">>, <<"Auto-Answer">>], AutoAnswer, Endpoint)];
+maybe_auto_answer(Endpoints, _) ->
     Endpoints.
 
 -spec get_application_data(cb_context:context()) -> wh_json:object().

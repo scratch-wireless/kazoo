@@ -211,10 +211,10 @@ refresh(?WH_ACCOUNTS_DB) ->
             ],
     whapps_util:update_views(?WH_ACCOUNTS_DB, Views, 'true'),
     'ok';
-refresh(?WH_FAXES) ->
-    couch_mgr:db_create(?WH_FAXES),
-    _ = couch_mgr:revise_doc_from_file(?WH_FAXES, 'fax', ?FAXES_VIEW_FILE),
-    _ = couch_mgr:revise_doc_from_file(?WH_FAXES, 'fax', ?FAXBOX_VIEW_FILE),
+refresh(?WH_FAXES_DB) ->
+    couch_mgr:db_create(?WH_FAXES_DB),
+    _ = couch_mgr:revise_doc_from_file(?WH_FAXES_DB, 'fax', ?FAXES_VIEW_FILE),
+    _ = couch_mgr:revise_doc_from_file(?WH_FAXES_DB, 'fax', ?FAXBOX_VIEW_FILE),
     'ok';
 refresh(?KZ_PORT_REQUESTS_DB) ->
     couch_mgr:db_create(?KZ_PORT_REQUESTS_DB),
@@ -977,5 +977,5 @@ remove_system_media_refs(HangupCause, Config) ->
 
 -spec remove_system_media_ref(wh_json:key(), wh_json:json_term(), wh_json:object()) ->
                                      wh_json:object().
-remove_system_media_ref(_Key, <<"/system_media/", _/binary>>, Acc) -> Acc;
+remove_system_media_ref(Key, <<"/system_media/", Value/binary>>, Acc) -> wh_json:set_value(Key, Value, Acc);
 remove_system_media_ref(Key, Value, Acc) -> wh_json:set_value(Key, Value, Acc).

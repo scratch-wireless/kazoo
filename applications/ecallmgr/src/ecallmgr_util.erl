@@ -12,7 +12,7 @@
 -module(ecallmgr_util).
 
 -export([send_cmd/4]).
--export([get_fs_kv/3]).
+-export([get_fs_kv/2, get_fs_kv/3]).
 -export([set/3]).
 -export([export/3, bridge_export/3]).
 -export([get_expires/1]).
@@ -285,7 +285,11 @@ is_node_up(Node, UUID) ->
 %% set channel and call variables in FreeSWITCH
 %% @end
 %%--------------------------------------------------------------------
--spec get_fs_kv(ne_binary(), ne_binary(), ne_binary()) -> binary().
+-spec get_fs_kv(ne_binary(), ne_binary()) -> binary().
+-spec get_fs_kv(ne_binary(), ne_binary(), api_binary()) -> binary().
+get_fs_kv(Key, Value) ->
+    get_fs_kv(Key, Value, 'undefined').
+
 get_fs_kv(<<"Hold-Media">>, Media, UUID) ->
     list_to_binary(["hold_music="
                     ,wh_util:to_list(media_path(Media, 'extant', UUID, wh_json:new()))
@@ -491,7 +495,8 @@ endpoint_jobjs_to_records([], _, BridgeEndpoints) ->
 endpoint_jobjs_to_records([Endpoint|Endpoints], IncludeVars, BridgeEndpoints) ->
     Key = endpoint_key(Endpoint),
     case wapi_dialplan:bridge_endpoint_v(Endpoint)
-        andalso (not lists:keymember(Key, 1, BridgeEndpoints)) of
+        andalso (not lists:keymember(Key, 1, BridgeEndpoints))
+    of
         'false' ->
             lager:debug("skipping invalid or duplicate endpoint: ~-300p~n", [Key]),
             endpoint_jobjs_to_records(Endpoints, IncludeVars, BridgeEndpoints);
@@ -499,7 +504,8 @@ endpoint_jobjs_to_records([Endpoint|Endpoints], IncludeVars, BridgeEndpoints) ->
             lager:debug("building bridge endpoint: ~-300p~n", [Key]),
             BridgeEndpoint = endpoint_jobj_to_record(Endpoint, IncludeVars),
             endpoint_jobjs_to_records(Endpoints, IncludeVars
-                                      ,[{Key, BridgeEndpoint}|BridgeEndpoints])
+                                      ,[{Key, BridgeEndpoint}|BridgeEndpoints]
+                                     )
     end.
 
 -spec endpoint_key(wh_json:object()) -> api_binaries().
@@ -509,6 +515,8 @@ endpoint_key(Endpoint) ->
      ,wh_json:get_value(<<"To-Realm">>, Endpoint)
      ,wh_json:get_value(<<"To-DID">>, Endpoint)
      ,wh_json:get_value(<<"Route">>, Endpoint)
+     ,wh_json:get_value(<<"Proxy-Zone">>, Endpoint)
+     ,wh_json:get_value(<<"Proxy-IP">>, Endpoint)
     ].
 
 -spec endpoint_jobj_to_record(wh_json:object()) -> bridge_endpoint().
@@ -705,6 +713,7 @@ get_sip_contact(#bridge_endpoint{ip_address=IPAddress}) -> IPAddress.
 
 -spec maybe_clean_contact(ne_binary(), bridge_endpoint()) -> ne_binary().
 maybe_clean_contact(<<"sip:", Contact/binary>>, _Endpoint) -> Contact;
+maybe_clean_contact(<<"sips:", Contact/binary>>, _Endpoint) -> Contact;
 maybe_clean_contact(Contact, #bridge_endpoint{invite_format = <<"route">>}) ->
     Contact;
 maybe_clean_contact(Contact, #bridge_endpoint{invite_format = <<"loopback">>}) ->

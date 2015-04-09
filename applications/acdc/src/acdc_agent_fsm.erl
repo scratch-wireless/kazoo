@@ -158,6 +158,8 @@ call_event(FSM, <<"call_event">>, <<"CHANNEL_BRIDGE">>, JObj) ->
     gen_fsm:send_event(FSM, {'channel_bridged', callid(JObj)});
 call_event(FSM, <<"call_event">>, <<"CHANNEL_UNBRIDGE">>, JObj) ->
     gen_fsm:send_event(FSM, {'channel_unbridged', callid(JObj)});
+call_event(FSM, <<"call_event">>, <<"usurp_control">>, JObj) ->
+    gen_fsm:send_event(FSM, {'channel_unbridged', callid(JObj)});
 call_event(FSM, <<"call_event">>, <<"CHANNEL_DESTROY">>, JObj) ->
     gen_fsm:send_event(FSM, {'channel_hungup', callid(JObj), hangup_cause(JObj)});
 call_event(FSM, <<"call_event">>, <<"LEG_CREATED">>, JObj) ->
@@ -347,15 +349,18 @@ init([AccountId, AgentId, Supervisor, Props, IsThief]) ->
                           ,max_connect_failures=max_failures(AccountDb, AccountId)
                          }}.
 
--spec max_failures(ne_binary(), ne_binary()) -> pos_integer() | 'infinity'.
-max_failures(AccountDb, AccountId) ->
-    case couch_mgr:open_cache_doc(AccountDb, AccountId) of
-        {'ok', AccountJObj} ->
-            case wh_json:get_integer_value(<<"max_connect_failures">>, AccountJObj, ?MAX_FAILURES) of
-                N when is_integer(N), N > 0 -> N;
-                _ -> 'infinity'
-            end;
+-spec max_failures(ne_binary(), ne_binary()) -> non_neg_integer().
+-spec max_failures(wh_json:object()) -> non_neg_integer().
+max_failures(AcctDb, AcctId) ->
+    case couch_mgr:open_cache_doc(AcctDb, AcctId) of
+        {'ok', AcctJObj} -> max_failures(AcctJObj);
         {'error', _} -> ?MAX_FAILURES
+    end.
+
+max_failures(JObj) ->
+    case wh_json:get_integer_value(<<"max_connect_failures">>, JObj) of
+        'undefined' -> ?MAX_FAILURES;
+        N -> N
     end.
 
 -spec wait_for_listener(pid(), pid(), wh_proplist(), boolean()) -> 'ok'.

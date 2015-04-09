@@ -116,7 +116,7 @@ recording_url(CallId, Data) ->
 
 -spec max_recording_time_limit() -> ?SECONDS_IN_HOUR.
 max_recording_time_limit() ->
-    whapps_config:get_integer(?WHS_CONFIG_CAT, <<"max_recording_time_limit">>, ?SECONDS_IN_HOUR).
+    whapps_config:get_integer(?WHM_CONFIG_CAT, <<"max_recording_time_limit">>, ?SECONDS_IN_HOUR).
 
 base_url(Host) ->
     Port = wh_couch_connections:get_port(),
@@ -232,6 +232,9 @@ get_prompt(Name, Call) ->
     Lang = whapps_call:language(Call),
     get_prompt(Name, Lang, Call).
 
+get_prompt(<<"prompt://", _/binary>> = PromptId, _Lang, _Call) ->
+    lager:debug("prompt is already encoded: ~s", [PromptId]),
+    PromptId;
 get_prompt(<<"/system_media/", Name/binary>>, Lang, Call) ->
     get_prompt(Name, Lang, Call);
 get_prompt(PromptId, Lang, 'undefined') ->
@@ -241,9 +244,14 @@ get_prompt(PromptId, Lang, <<_/binary>> = AccountId) ->
 get_prompt(PromptId, Lang, Call) ->
     get_prompt(PromptId, Lang, whapps_call:account_id(Call)).
 
+get_prompt(<<"prompt://", _/binary>> = PromptId, _Lang, _AccountId, _UseOverride) ->
+    lager:debug("prompt is already encoded: ~s", [PromptId]),
+    PromptId;
 get_prompt(PromptId, Lang, AccountId, 'true') ->
+    lager:debug("using account override for ~s in account ~s", [PromptId, AccountId]),
     wh_util:join_binary([<<"prompt:/">>, AccountId, PromptId, Lang], <<"/">>);
 get_prompt(PromptId, Lang, _AccountId, 'false') ->
+    lager:debug("account overrides not enabled; ignoring account prompt for ~s", [PromptId]),
     wh_util:join_binary([<<"prompt:/">>, ?WH_MEDIA_DB, PromptId, Lang], <<"/">>).
 
 -spec get_account_prompt(ne_binary(), api_binary(), whapps_call:call()) -> api_binary().
@@ -389,7 +397,7 @@ default_prompt_language() ->
     default_prompt_language(<<"en-us">>).
 default_prompt_language(Default) ->
     wh_util:to_lower_binary(
-      whapps_config:get(?WHS_CONFIG_CAT, ?PROMPT_LANGUAGE_KEY, Default)
+      whapps_config:get(?WHM_CONFIG_CAT, ?PROMPT_LANGUAGE_KEY, Default)
      ).
 
 -spec prompt_language(api_binary()) -> ne_binary().
@@ -406,6 +414,6 @@ prompt_language(<<_/binary>> = AccountId, Default) ->
         'false' -> default_prompt_language();
         'true' ->
             wh_util:to_lower_binary(
-              whapps_account_config:get(AccountId, ?WHS_CONFIG_CAT, ?PROMPT_LANGUAGE_KEY, wh_util:to_lower_binary(Default))
+              whapps_account_config:get(AccountId, ?WHM_CONFIG_CAT, ?PROMPT_LANGUAGE_KEY, wh_util:to_lower_binary(Default))
              )
     end.
