@@ -57,7 +57,7 @@
                   ,account_billing :: api_binary() | '$7' | '_'
                   ,authorizing_id :: api_binary() | '$1' | '$3' | '_'
                   ,authorizing_type :: api_binary() | '_'
-                  ,owner_id :: api_binary() | '_'
+                  ,owner_id :: api_binary() | '$1' | '_'
                   ,resource_id :: api_binary() | '$4' | '_'
                   ,presence_id :: api_binary() | '$2' | '_'
                   ,fetch_id :: api_binary() | '$5' | '_'
@@ -159,7 +159,7 @@
 -define(GET_CCV(Key), <<"variable_", ?CHANNEL_VAR_PREFIX, Key/binary>>).
 -define(SET_CCV(Key, Value), <<?CHANNEL_VAR_PREFIX, Key/binary, "=", Value/binary>>).
 
--define(CREDS_KEY(Realm, Username), {?MODULE, 'authn', Username, Realm}).
+-define(CREDS_KEY(Realm, Username), {'authn', Username, Realm}).
 
 %% Call and Channel Vars that have a special prefix instead of the standard CHANNEL_VAR_PREFIX prefix
 %% [{AMQP-Header, FS-var-name}]

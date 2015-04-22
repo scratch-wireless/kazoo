@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%%% @copyright (C) 2012-2014, 2600Hz INC
+%%% @copyright (C) 2012-2015, 2600Hz INC
 %%% @doc
 %%%
 %%% @end
@@ -42,7 +42,8 @@
                   ]).
 -define(RESPONDERS, [{{?MODULE, 'handle_advertise'}
                       ,[{<<"nodes">>, <<"advertise">>}]
-                     }]).
+                     }
+                    ]).
 -define(QUEUE_NAME, <<>>).
 -define(QUEUE_OPTIONS, []).
 -define(CONSUME_OPTIONS, [{'no_local', 'true'}]).
@@ -58,6 +59,7 @@
                 ,notify_expire = sets:new() :: set()
                 ,node :: ne_binary()
                 ,zone = 'local' :: atom()
+                ,version :: ne_binary()
                }).
 -type nodes_state() :: #state{}.
 
@@ -174,7 +176,9 @@ print_status(Nodes) ->
                          status_list(Whapps, 0)
                  end,
              _ = case lists:sort(Node#node.media_servers) of
-                     []-> 'ok';
+                     [] when Node#node.registrations =:= 0 -> 'ok';
+                     [] when Node#node.registrations > 0 ->
+                         io:format("Registrations : ~B~n", [Node#node.registrations]);
                      [{Server, Started}|Servers] ->
                          io:format("Channels      : ~B~n", [Node#node.channels]),
                          io:format("Registrations : ~B~n", [Node#node.registrations]),
@@ -279,7 +283,13 @@ init([]) ->
     lager:debug("created node: ~p", [Node]),
     ets:insert(Tab, Node),
     lager:debug("inserted node"),
-    {'ok', State#state{node=wh_util:to_binary(Node#node.node)}}.
+    Version = <<(wh_util:whistle_version())/binary
+                ," - "
+                ,(wh_util:to_binary(erlang:system_info('otp_release')))/binary
+              >>,
+    {'ok', State#state{node=wh_util:to_binary(Node#node.node)
+                       ,version=Version
+                      }}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -438,13 +448,15 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 -spec create_node('undefined' | 5000..15000, nodes_state()) -> wh_node().
-create_node(Heartbeat, #state{zone=Zone}) ->
+create_node(Heartbeat, #state{zone=Zone
+                              ,version=Version
+                             }) ->
     maybe_add_whapps_data(#node{expires=Heartbeat
                                 ,broker=wh_amqp_connections:primary_broker()
                                 ,used_memory=erlang:memory('total')
                                 ,processes=erlang:system_info('process_count')
                                 ,ports=length(erlang:ports())
-                                ,version=wh_util:to_binary(erlang:system_info('otp_release'))
+                                ,version=Version
                                 ,zone=wh_util:to_binary(Zone)
                                }).
 
@@ -547,12 +559,12 @@ from_json(JObj, State) ->
     Node = wh_json:get_value(<<"Node">>, JObj),
     #node{node=wh_util:to_atom(Node, 'true')
           ,expires=wh_util:to_integer(wh_json:get_integer_value(<<"Expires">>, JObj, 0) * ?FUDGE_FACTOR)
-          ,whapps=whapps_from_json(wh_json:get_value(<<"WhApps">>, JObj))
+          ,whapps=whapps_from_json(wh_json:get_value(<<"WhApps">>, JObj, []))
           ,media_servers=wh_json:get_value(<<"Media-Servers">>, JObj, [])
           ,used_memory=wh_json:get_integer_value(<<"Used-Memory">>, JObj, 0)
           ,processes=wh_json:get_integer_value(<<"Processes">>, JObj, 0)
           ,ports=wh_json:get_integer_value(<<"Ports">>, JObj, 0)
-          ,version=wh_json:get_value(<<"Version">>, JObj, <<"unknown">>)
+          ,version=wh_json:get_first_defined([<<"Version">>, <<"App-Version">>], JObj, <<"unknown">>)
           ,channels=wh_json:get_integer_value(<<"Channels">>, JObj, 0)
           ,registrations=wh_json:get_integer_value(<<"Registrations">>, JObj, 0)
           ,zone=get_zone(JObj, State)
@@ -573,7 +585,14 @@ whapp_from_json(Key, JObj) ->
     {Key, whapp_info_from_json(wh_json:get_value(Key, JObj))}.
 
 whapp_info_from_json(JObj) ->
-    #whapp_info{startup=wh_json:get_value(<<"Startup">>, JObj)}.
+    case wh_json:get_value(<<"Startup">>, JObj) of
+        'undefined' ->
+            #whapp_info{};
+        V when V < ?UNIX_EPOCH_IN_GREGORIAN ->
+            #whapp_info{startup=wh_util:unix_seconds_to_gregorian_seconds(V)};
+        V ->
+            #whapp_info{startup=V}
+    end.
 
 -spec whapps_to_json(whapps_info()) -> wh_json:object().
 -spec whapp_to_json({ne_binary(), whapp_info()}) -> {ne_binary(), wh_json:object()}.

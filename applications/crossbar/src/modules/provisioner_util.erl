@@ -210,7 +210,8 @@ maybe_send_contact_list(Context, 'success') ->
             <<"provisioner_v5">> ->
                 spawn('provisioner_v5', 'update_user', [cb_context:account_id(Context)
                                                         ,cb_context:doc(Context)
-                                                        ,cb_context:auth_token(Context)]);
+                                                        ,cb_context:auth_token(Context)
+                                                       ]);
             _ -> 'ok'
         end,
     Context;
@@ -347,10 +348,10 @@ do_simple_provision(MACAddress, Context) ->
                         ]),
             HTTPOptions = [],
             Body = [{"device[mac]", MACAddress}
-                    ,{"device[label]", wh_json:get_string_value(<<"name">>, JObj)}
-                    ,{"sip[realm]", wh_json:get_string_value([<<"sip">>, <<"realm">>], JObj, AccountRealm)}
-                    ,{"sip[username]", wh_json:get_string_value([<<"sip">>, <<"username">>], JObj)}
-                    ,{"sip[password]", wh_json:get_string_value([<<"sip">>, <<"password">>], JObj)}
+                    ,{"device[label]", wh_json:get_value(<<"name">>, JObj)}
+                    ,{"sip[realm]", kz_device:sip_realm(JObj, AccountRealm)}
+                    ,{"sip[username]", kz_device:sip_username(JObj)}
+                    ,{"sip[password]", kz_device:sip_password(JObj)}
                     ,{"submit", "true"}
                    ],
             Encoded = mochiweb_util:urlencode(Body),
@@ -404,6 +405,8 @@ do_full_provision(MACAddress, JObj) ->
                  >>,
     maybe_send_to_full_provisioner(PartialURL, JObj).
 
+-spec maybe_send_to_full_provisioner(ne_binary()) -> boolean().
+-spec maybe_send_to_full_provisioner(ne_binary(), wh_json:object()) -> boolean().
 maybe_send_to_full_provisioner(PartialURL) ->
     case whapps_config:get_binary(?MOD_CONFIG_CAT, <<"provisioning_url">>) of
         'undefined' -> 'false';
@@ -422,7 +425,7 @@ maybe_send_to_full_provisioner(PartialURL, JObj) ->
                          ,{"User-Agent", wh_util:to_list(erlang:node())}
                          ,{"Content-Type", "application/json"}
                         ]),
-            FullUrl = wh_util:to_list(<<Url/binary, "/", PartialURL/binary>>),
+            FullUrl = wh_util:to_lower_string(<<Url/binary, "/", PartialURL/binary>>),
             {'ok', _, _, RawJObj} = ibrowse:send_req(FullUrl, Headers, 'get', "", [{'inactivity_timeout', 10000}]),
             case wh_json:get_integer_value([<<"error">>, <<"code">>], wh_json:decode(RawJObj)) of
                 'undefined' -> send_to_full_provisioner('post', FullUrl, JObj);
@@ -431,7 +434,7 @@ maybe_send_to_full_provisioner(PartialURL, JObj) ->
             end
     end.
 
--spec send_to_full_provisioner(ne_binary()) -> boolean().
+-spec send_to_full_provisioner(string()) -> boolean().
 send_to_full_provisioner(FullUrl) ->
     Headers = props:filter_undefined(
                 [{"Host", whapps_config:get_string(?MOD_CONFIG_CAT, <<"provisioning_host">>)}
@@ -444,7 +447,7 @@ send_to_full_provisioner(FullUrl) ->
     lager:debug("response from server: ~p", [Res]),
     'true'.
 
--spec send_to_full_provisioner('put' | 'post', ne_binary(), wh_json:object()) -> boolean().
+-spec send_to_full_provisioner('put' | 'post', string(), wh_json:object()) -> boolean().
 send_to_full_provisioner('put', FullUrl, JObj) ->
     Headers = props:filter_undefined(
                 [{"Host", whapps_config:get_string(?MOD_CONFIG_CAT, <<"provisioning_host">>)}
@@ -638,31 +641,31 @@ set_account_line_defaults(Context) ->
 set_device_line_defaults(Context) ->
     Device = cb_context:doc(Context),
     [fun(J) ->
-             case wh_json:get_ne_value([<<"sip">>, <<"username">>], Device) of
+             case kz_device:sip_username(Device) of
                  'undefined' -> J;
                  Value -> wh_json:set_value([<<"authname">>, <<"value">>], Value, J)
              end
      end
      ,fun(J) ->
-              case wh_json:get_ne_value([<<"sip">>, <<"username">>], Device) of
+              case kz_device:sip_username(Device) of
                   'undefined' -> J;
                   Value -> wh_json:set_value([<<"username">>, <<"value">>], Value, J)
               end
       end
      ,fun(J) ->
-              case wh_json:get_ne_value([<<"sip">>, <<"password">>], Device) of
+              case kz_device:sip_password(Device) of
                   'undefined' -> J;
                   Value -> wh_json:set_value([<<"secret">>, <<"value">>], Value, J)
               end
       end
      ,fun(J) ->
-              case wh_json:get_ne_value([<<"sip">>, <<"realm">>], Device) of
+              case kz_device:sip_realm(Device) of
                   'undefined' -> J;
                   Value -> wh_json:set_value([<<"server_host">>, <<"value">>], Value, J)
               end
       end
      ,fun(J) ->
-              case wh_json:get_ne_value(<<"name">>, Device) of
+              case kz_device:name(Device) of
                   'undefined' -> J;
                   Value -> wh_json:set_value([<<"displayname">>, <<"value">>], Value, J)
               end

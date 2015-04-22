@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%%% @copyright (C) 2011-2014, 2600Hz
+%%% @copyright (C) 2011-2015, 2600Hz
 %%% @doc
 %%%
 %%% @end
@@ -13,6 +13,7 @@
          ,load_from_file/2
          ,load_merge/2, load_merge/3
          ,merge/3
+         ,patch_and_validate/3
          ,load_view/3, load_view/4, load_view/5, load_view/6
          ,load_attachment/3, load_docs/2
          ,save/1, save/2
@@ -31,10 +32,12 @@
 
 -export([handle_json_success/2]).
 -export([handle_couch_mgr_success/2
-        ,handle_couch_mgr_errors/3
+         ,handle_couch_mgr_errors/3
         ]).
 
--export_type([view_options/0]).
+-export_type([view_options/0
+              ,startkey/0
+             ]).
 
 -include("crossbar.hrl").
 
@@ -56,14 +59,21 @@
 
 -type direction() :: 'ascending' | 'descending'.
 
--type view_options() :: couch_util:view_options() |
-                        [{'databases', ne_binaries()}].
+-type startkey() :: wh_json:json_term() | 'undefined'.
 
+-type startkey_fun() :: 'undefined' |
+                        fun((cb_context:context()) -> startkey()) |
+                        fun((wh_proplist(), cb_context:context()) -> startkey()).
+
+-type view_options() :: couch_util:view_options() |
+                        [{'databases', ne_binaries()} |
+                         {'startkey_fun', startkey_fun()}
+                        ].
 
 -record(load_view_params, {view :: api_binary()
                            ,view_options = [] :: view_options()
                            ,context :: cb_context:context()
-                           ,start_key :: wh_json:json_term()
+                           ,start_key :: startkey()
                            ,page_size :: non_neg_integer() | api_binary()
                            ,filter_fun :: filter_fun()
                            ,dbs = [] :: ne_binaries()
@@ -219,6 +229,22 @@ merge(DataJObj, JObj, Context) ->
     PrivJObj = wh_json:private_fields(JObj),
     handle_couch_mgr_success(wh_json:merge_jobjs(PrivJObj, DataJObj), Context).
 
+-type validate_fun() :: fun((ne_binary(), cb_context:context()) -> cb_context:context()).
+
+-spec patch_and_validate(ne_binary(), cb_context:context(), validate_fun()) ->
+                                cb_context:context().
+patch_and_validate(Id, Context, ValidateFun) ->
+    Context1 = crossbar_doc:load(Id, Context),
+    Context2 = case cb_context:resp_status(Context1) of
+                   'success' ->
+                       PubJObj = wh_doc:public_fields(cb_context:req_data(Context)),
+                       PatchedJObj = wh_json:merge_jobjs(PubJObj, cb_context:doc(Context1)),
+                       cb_context:set_req_data(Context, PatchedJObj);
+                   _Status ->
+                       Context1
+               end,
+    ValidateFun(Id, Context2).
+
 %%--------------------------------------------------------------------
 %% @public
 %% @doc
@@ -297,11 +323,9 @@ load_view(#load_view_params{view=View
                             ,context=Context
                             ,start_key=StartKey
                             ,page_size=PageSize
-                            ,filter_fun=FilterFun
                             ,dbs=[Db|Dbs]
                             ,direction=_Direction
                            }=LVPs) ->
-    HasFilter = is_function(FilterFun, 2) orelse has_qs_filter(Context),
     Limit = limit_by_page_size(Context, PageSize),
 
     lager:debug("limit: ~p page_size: ~p dir: ~p", [Limit, PageSize, _Direction]),
@@ -314,8 +338,8 @@ load_view(#load_view_params{view=View
           ]),
 
     IncludeOptions =
-        case HasFilter of
-            'true' -> ['include_docs' | props:delete('include_docs', DefaultOptions)];
+        case has_qs_filter(Context) of
+            'true' -> props:insert_value('include_docs', DefaultOptions);
             'false' -> DefaultOptions
         end,
 
@@ -325,8 +349,11 @@ load_view(#load_view_params{view=View
             'false' -> IncludeOptions;
             _V -> props:delete('include_docs', IncludeOptions)
         end,
-
     case couch_mgr:get_results(Db, View, ViewOptions) of
+        % There were more dbs, so move to the next one
+        {'error', 'not_found'} ->
+            lager:debug("either the db ~s or view ~s was not found", [Db, View]),
+            load_view(LVPs#load_view_params{dbs=Dbs});
         {'error', Error} ->
             handle_couch_mgr_errors(Error, View, Context);
         {'ok', JObjs} ->
@@ -336,7 +363,8 @@ load_view(#load_view_params{view=View
                                                 ,cb_context:api_version(Context)
                                                 ,LVPs#load_view_params{dbs=Dbs
                                                                        ,context=cb_context:set_resp_status(Context, 'success')
-                                                                      })
+                                                                      }
+                                               )
     end.
 
 -spec limit_by_page_size(api_binary() | pos_integer()) ->
@@ -566,7 +594,7 @@ save_attachment(DocId, Name, Contents, Context, Options) ->
                     {'ok', Rev} = couch_mgr:lookup_doc_rev(cb_context:account_db(Context), DocId),
                     lager:debug("looking up rev for ~s: ~s", [DocId, Rev]),
                     [{'rev', Rev} | Options];
-                O -> O
+                _O -> Options
             end,
 
     AName = wh_util:clean_binary(Name),

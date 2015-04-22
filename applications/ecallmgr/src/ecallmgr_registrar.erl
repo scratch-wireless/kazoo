@@ -434,7 +434,6 @@ handle_cast({'flush', Realm}, State) ->
     {'noreply', State};
 handle_cast({'flush', Username, Realm}, State) ->
     _ = ets:delete(?MODULE, registration_id(Username, Realm)),
-    ecallmgr_fs_nodes:flush(Username, Realm),
     {'noreply', State};
 handle_cast(_Msg, State) ->
     {'noreply', State}.
@@ -897,6 +896,7 @@ query_authn(#registration{username=Username
                           ,from_user=FromUser
                           ,from_host=FromHost
                           ,network_ip=NetworkIP
+                          ,network_port=NetworkPort
                           ,registrar_node=Node
                           ,call_id=CallId
                          }=Reg) ->
@@ -904,6 +904,7 @@ query_authn(#registration{username=Username
     Req = [{<<"To">>, <<ToUser/binary, "@", ToHost/binary>>}
            ,{<<"From">>, <<FromUser/binary, "@", FromHost/binary>>}
            ,{<<"Orig-IP">>, NetworkIP}
+           ,{<<"Orig-Port">>, NetworkPort}
            ,{<<"Auth-User">>, Username}
            ,{<<"Auth-Realm">>, Realm}
            ,{<<"Media-Server">>, wh_util:to_binary(Node)}
@@ -923,8 +924,13 @@ query_authn(#registration{username=Username
             AccountId = wh_json:get_value(<<"Account-ID">>, CCVs),
             AccountDb = wh_util:format_account_id(AccountId, 'encoded'),
             AuthorizingId = wh_json:get_value(<<"Authorizing-ID">>, CCVs),
+            OwnerIdProp = case wh_json:get_value([<<"Custom-Channel-Vars">>, <<"Owner-ID">>], JObj) of
+                              'undefined' -> [];
+                              OwnerId -> [{'db', AccountDb, OwnerId}]
+                          end,
             CacheProps = [{'origin', [{'db', AccountDb, AuthorizingId}
                                       ,{'db', AccountDb, AccountId}
+                                      | OwnerIdProp
                                      ]}
                          ],
             wh_cache:store_local(?ECALLMGR_AUTH_CACHE

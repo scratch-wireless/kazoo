@@ -46,6 +46,8 @@
 -export([error_number_not_found/1]).
 -export([error_service_restriction/2]).
 -export([error_provider_fault/2]).
+-export([error_provider_update/2]).
+-export([error_user_fault/2]).
 -export([error_carrier_fault/2]).
 -export([error_number_is_porting/1]).
 
@@ -929,10 +931,21 @@ exec_providers([Provider|Providers], Action, Number) ->
             exec_providers(Providers, Action, Number);
         Mod ->
             case apply(Mod, Action, [Number]) of
-                #number{}=N -> exec_providers(Providers, Action, N);
+                #number{}=N ->
+                    lager:debug("successfully attempted ~s:~s/1", [Mod, Action]),
+                    exec_providers(Providers, Action, N);
                 {'error', Reason} ->
-                    Errors = wh_json:from_list([{Provider, Reason}]),
-                    wnm_number:error_provider_fault(Errors, Number)
+                    lager:debug("failed attempting ~s:~s/1: ~p", [Mod, Action, Reason]),
+                    Error = wh_json:from_list([{Provider, Reason}]),
+                    wnm_number:error_provider_fault(Error, Number);
+                {'invalid', Data} ->
+                    lager:debug("failed attempting ~s:~s/1: ~p", [Mod, Action, Data]),
+                    Error = wh_json:set_value(<<"provider">>, Provider, Data),
+                    wnm_number:error_user_fault(Error, Number);
+                {'multiple_choice', Update} ->
+                    lager:debug("update sent by ~s", [Mod]),
+                    Error = wh_json:from_list([{Provider, Update}]),
+                    wnm_number:error_provider_update(Error, Number)
             end
     end.
 
@@ -1017,6 +1030,20 @@ error_provider_fault(Reason, N) ->
     lager:debug("feature provider(s) fault: ~p", [wh_json:encode(Reason)]),
     throw({'provider_fault'
            ,N#number{error_jobj=wh_json:from_list([{<<"provider_fault">>, Reason}])}
+          }).
+
+-spec error_provider_update(wh_json:json_term(), wnm_number()) -> no_return().
+error_provider_update(Data, N) ->
+    lager:debug("feature provider(s) update"),
+    throw({'multiple_choice'
+           ,N#number{error_jobj=wh_json:from_list([{<<"multiple_choice">>, Data}])}
+          }).
+
+-spec error_user_fault(wh_json:json_term(), wnm_number()) -> no_return().
+error_user_fault(Data, N) ->
+    lager:debug("feature user fault: ~p", [wh_json:encode(Data)]),
+    throw({'invalid'
+           ,N#number{error_jobj=Data}
           }).
 
 -spec error_carrier_fault(wh_json:json_term(), wnm_number()) -> no_return().
@@ -1208,6 +1235,13 @@ load_phone_number_doc(Account, 'false') ->
 -spec update_service_plans(wnm_number()) -> wnm_number().
 update_service_plans(#number{billing_id='undefined'
                              ,assigned_to='undefined'
+                             ,prev_assigned_to='undefined'
+                             ,number=Number
+                            }=N) ->
+    lager:error("failed to update services_plan for ~p account is undefined", [Number]),
+    N;
+update_service_plans(#number{billing_id='undefined'
+                             ,assigned_to='undefined'
                              ,prev_assigned_to=Account
                             }=N) ->
     update_service_plans(N#number{billing_id=wh_services:get_billing_id(Account)});
@@ -1279,16 +1313,20 @@ activate_feature(Feature, 0, #number{features=Features}=N) ->
 activate_feature(Feature, Units, #number{feature_activation_charges=Charges
                                          ,billing_id=BillingId
                                          ,features=Features
+                                         ,number=_Number
                                         }=N) ->
     Charge = Charges + Units,
     case wh_services:check_bookkeeper(BillingId, Charge) of
         'false' ->
-            Reason = io_lib:format("not enough credit to activate feature '~s' for $~p", [Feature, wht_util:units_to_dollars(Units)]),
+            Reason = io_lib:format("not enough credit to activate feature '~s' for $~p"
+                                   ,[Feature, wht_util:units_to_dollars(Units)]
+                                  ),
             lager:debug("~s", [Reason]),
             error_service_restriction([{<<"target">>, wht_util:units_to_dollars(Charge)}
                                        ,{<<"message">>, <<"not enough credit to activate feature">>}
                                       ], N);
         'true' ->
+            lager:debug("adding feature ~s to ~s", [Feature, _Number]),
             N#number{activations=append_feature_debit(Feature, Units, N)
                      ,features=sets:add_element(Feature, Features)
                      ,feature_activation_charges=Charge

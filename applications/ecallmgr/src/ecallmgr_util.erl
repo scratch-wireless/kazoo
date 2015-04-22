@@ -17,7 +17,7 @@
 -export([export/3, bridge_export/3]).
 -export([get_expires/1]).
 -export([get_interface_properties/1, get_interface_properties/2]).
--export([get_sip_to/1, get_sip_from/1, get_sip_request/1, get_orig_ip/1]).
+-export([get_sip_to/1, get_sip_from/1, get_sip_request/1, get_orig_ip/1, get_orig_port/1]).
 -export([custom_channel_vars/1, custom_channel_vars/2]).
 -export([eventstr_to_proplist/1, varstr_to_proplist/1, get_setting/1, get_setting/2]).
 -export([is_node_up/1, is_node_up/2]).
@@ -211,6 +211,14 @@ get_sip_request(Props) ->
 get_orig_ip(Prop) ->
     props:get_first_defined([<<"X-AUTH-IP">>, <<"ip">>], Prop).
 
+-spec get_orig_port(wh_proplist()) -> api_binary().
+get_orig_port(Prop) ->
+    case props:get_first_defined([<<"X-AUTH-PORT">>, <<"port">>], Prop) of
+        <<>> -> 'undefined';
+        <<"0">> -> 'undefined';
+        Port -> Port
+    end.
+
 %% Extract custom channel variables to include in the event
 -spec custom_channel_vars(wh_proplist()) -> wh_proplist().
 -spec custom_channel_vars(wh_proplist(), wh_proplist()) -> wh_proplist().
@@ -303,14 +311,18 @@ get_fs_kv(Key, Val, _) ->
             list_to_binary([Prefix, "=", wh_util:to_list(V), ""])
     end.
 
--spec get_fs_key_and_value(ne_binary(), ne_binary() | wh_json:object(), ne_binary()) ->
+-spec get_fs_key_and_value(ne_binary()
+                           ,ne_binary() | ne_binaries() | wh_json:object()
+                           ,ne_binary()
+                          ) ->
                                   {ne_binary(), binary()} |
+                                  [{ne_binary(), binary()},...] | [] |
                                   'skip'.
 get_fs_key_and_value(<<"Hold-Media">>, Media, UUID) ->
     {<<"hold_music">>, media_path(Media, 'extant', UUID, wh_json:new())};
-get_fs_key_and_value(<<"Diversion">>, DiversionJObj, _UUID) ->
-    lager:debug("setting diversion header to ~s", [kzsip_diversion:to_binary(DiversionJObj)]),
-    {<<"sip_h_Diversion">>, kzsip_diversion:to_binary(DiversionJObj)};
+get_fs_key_and_value(<<"Diversions">>, Diversions, _UUID) ->
+    lager:debug("setting diversions ~p on the channel", [Diversions]),
+    [{<<"sip_h_Diversion">>, D} || D <- Diversions];
 get_fs_key_and_value(Key, Val, _UUID) when is_binary(Val) ->
     case lists:keyfind(Key, 1, ?SPECIAL_CHANNEL_VARS) of
         'false' ->
@@ -439,16 +451,29 @@ export(Node, UUID, Props) ->
                     ecallmgr_util:send_cmd_ret().
 bridge_export(_, _, []) -> 'ok';
 bridge_export(Node, UUID, [{<<"Auto-Answer", _/binary>> = K, V} | Props]) ->
-    BridgeExports = [get_fs_key_and_value(Key, Val, UUID)
-                     || {Key, Val} <- Props
-                    ],
+    BridgeExports = get_fs_keys_and_values(UUID, Props),
     ecallmgr_fs_command:bridge_export(Node, UUID, [{<<"alert_info">>, <<"intercom">>}
                                                    ,get_fs_key_and_value(K, V, UUID)
-                                                   | props:filter(BridgeExports, 'skip')
-                                                  ]);
+                                                   | BridgeExports
+                                                  ]
+                                     );
 bridge_export(Node, UUID, Props) ->
-    BridgeExports = [get_fs_key_and_value(Key, Val, UUID) || {Key, Val} <- Props],
-    ecallmgr_fs_command:bridge_export(Node, UUID, props:filter(BridgeExports, 'skip')).
+    BridgeExports = get_fs_keys_and_values(UUID, Props),
+    ecallmgr_fs_command:bridge_export(Node, UUID, BridgeExports).
+
+-spec get_fs_keys_and_values(ne_binary(), wh_proplist()) -> wh_proplist().
+get_fs_keys_and_values(UUID, Props) ->
+    lists:foldl(fun(P, A) -> get_fs_kvs_fold(P, A, UUID) end, [], Props).
+
+-spec get_fs_kvs_fold({ne_binary(), wh_json:json_term()}, wh_proplist(), ne_binary()) ->
+                             wh_proplist().
+get_fs_kvs_fold({K, V}, Acc, UUID) ->
+    case get_fs_key_and_value(K, V, UUID) of
+        'skip' -> Acc;
+        {_FSKey, _FSVal}=T -> [T | Acc];
+        [] -> Acc;
+        [_|_]=L -> L ++ Acc
+    end.
 
 %%--------------------------------------------------------------------
 %% @public
@@ -571,8 +596,33 @@ build_simple_channels(Endpoints) ->
 
 -spec build_bridge_channels(wh_json:objects()) -> bridge_channels().
 build_bridge_channels(Endpoints) ->
-    EPs = endpoint_jobjs_to_records(Endpoints),
+    CWEP = maybe_apply_call_waiting(Endpoints),
+    EPs = endpoint_jobjs_to_records(CWEP),
     build_bridge_channels(EPs, []).
+
+-spec maybe_apply_call_waiting(wh_json:objects()) -> wh_json:objects().
+maybe_apply_call_waiting(Endpoints) ->
+    lists:map(fun call_waiting_map/1, Endpoints).
+
+-spec call_waiting_map(wh_json:object()) -> wh_json:object().
+call_waiting_map(Endpoint) ->
+    CCVs = wh_json:get_value(<<"Custom-Channel-Vars">>, Endpoint, wh_json:new()),
+    case wh_json:is_true(<<"Call-Waiting-Disabled">>, CCVs) of
+        'false' -> Endpoint;
+        'true' ->
+            OwnerId = wh_json:get_value(<<"Owner-ID">>, CCVs),
+            maybe_add_respond_header(Endpoint, OwnerId)
+    end.
+
+-spec maybe_add_respond_header(wh_json:object(), ne_binary()) -> wh_json:object().
+maybe_add_respond_header(Endpoint, OwnerId) ->
+    case ecallmgr_fs_channels:has_channels_for_owner(OwnerId) of
+        'true' ->
+            lager:debug("Channel must be busy!"),
+            wh_json:set_value([<<"Custom-SIP-Headers">>, <<"X-KAZOO-Respond-With">>], <<"486 User Busy">>, Endpoint);
+        'false' ->
+            Endpoint
+    end.
 
 -spec build_bridge_channels(bridge_endpoints(), build_returns()) -> bridge_channels().
 %% If the Invite-Format is "route" then we have been handed a sip route, do that now
@@ -1024,9 +1074,23 @@ maybe_flush_node_of_media(_MediaUrl, _Node) ->
 
 -spec custom_sip_headers(wh_proplist()) -> wh_proplist().
 custom_sip_headers(Props) ->
-    lists:map(fun normalize_custom_sip_header_name/1
-              ,props:filter(fun is_custom_sip_header/1, Props)
-             ).
+    lists:foldl(fun maybe_aggregate_headers/2
+                ,[]
+                ,props:filter(fun is_custom_sip_header/1, Props)
+               ).
+
+-spec maybe_aggregate_headers({ne_binary(), ne_binary()}, wh_proplist()) ->
+                                     wh_proplist().
+maybe_aggregate_headers(KV, Acc) ->
+    {K, V} = normalize_custom_sip_header_name(KV),
+    maybe_aggregate_headers(K, V, Acc).
+
+maybe_aggregate_headers(<<"Diversion">>, Diversion, Acc) ->
+    lager:debug("adding diversion ~s to SIP headers", [Diversion]),
+    Diversions = props:get_value(<<"Diversions">>, Acc, []),
+    props:set_value(<<"Diversions">>, [Diversion | Diversions], Acc);
+maybe_aggregate_headers(K, V, Acc) ->
+    [{K,V} | Acc].
 
 -spec normalize_custom_sip_header_name(term()) -> term().
 normalize_custom_sip_header_name({<<"variable_sip_h_", K/binary>>, V}) -> {K, V};

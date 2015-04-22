@@ -4,6 +4,7 @@
 -include_lib("whistle/include/wh_amqp.hrl").
 -include_lib("whistle/include/wh_log.hrl").
 -include_lib("whistle/include/wh_databases.hrl").
+-include_lib("whistle/include/kz_system_config.hrl").
 
 -include("crossbar_types.hrl").
 
@@ -13,6 +14,8 @@
 
 -define(MAINTENANCE_VIEW_FILE, <<"views/maintenance.json">>).
 -define(ACCOUNTS_AGG_VIEW_FILE, <<"views/accounts.json">>).
+
+-define(CB_APPS_STORE_LIST, <<"apps_store/crossbar_listing">>).
 
 -define(APP_NAME, <<"crossbar">>).
 -define(APP_VERSION, <<"0.8.0">>).

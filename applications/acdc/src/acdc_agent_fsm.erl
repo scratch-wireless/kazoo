@@ -112,7 +112,7 @@
                 ,fsm_call_id :: api_binary() % used when no call-ids are available
                 ,endpoints = [] :: wh_json:objects()
                 ,outbound_call_id :: api_binary()
-                ,max_connect_failures :: pos_integer() | 'infinity'
+                ,max_connect_failures :: wh_timeout()
                 ,connect_failures = 0 :: non_neg_integer()
                }).
 -type fsm_state() :: #state{}.
@@ -155,19 +155,19 @@ agent_timeout(FSM, JObj) ->
 %%--------------------------------------------------------------------
 -spec call_event(pid(), ne_binary(), ne_binary(), wh_json:object()) -> 'ok'.
 call_event(FSM, <<"call_event">>, <<"CHANNEL_BRIDGE">>, JObj) ->
-    gen_fsm:send_event(FSM, {'channel_bridged', callid(JObj)});
+    gen_fsm:send_event(FSM, {'channel_bridged', call_id(JObj)});
 call_event(FSM, <<"call_event">>, <<"CHANNEL_UNBRIDGE">>, JObj) ->
-    gen_fsm:send_event(FSM, {'channel_unbridged', callid(JObj)});
+    gen_fsm:send_event(FSM, {'channel_unbridged', call_id(JObj)});
 call_event(FSM, <<"call_event">>, <<"usurp_control">>, JObj) ->
-    gen_fsm:send_event(FSM, {'channel_unbridged', callid(JObj)});
+    gen_fsm:send_event(FSM, {'usurp_control', call_id(JObj)});
 call_event(FSM, <<"call_event">>, <<"CHANNEL_DESTROY">>, JObj) ->
-    gen_fsm:send_event(FSM, {'channel_hungup', callid(JObj), hangup_cause(JObj)});
+    gen_fsm:send_event(FSM, {'channel_hungup', call_id(JObj), hangup_cause(JObj)});
 call_event(FSM, <<"call_event">>, <<"LEG_CREATED">>, JObj) ->
-    gen_fsm:send_event(FSM, {'leg_created', callid(JObj)});
+    gen_fsm:send_event(FSM, {'leg_created', call_id(JObj)});
 call_event(FSM, <<"call_event">>, <<"LEG_DESTROYED">>, JObj) ->
-    gen_fsm:send_event(FSM, {'leg_destroyed', callid(JObj)});
+    gen_fsm:send_event(FSM, {'leg_destroyed', call_id(JObj)});
 call_event(FSM, <<"call_event">>, <<"CHANNEL_ANSWER">>, JObj) ->
-    gen_fsm:send_event(FSM, {'channel_answered', callid(JObj)});
+    gen_fsm:send_event(FSM, {'channel_answered', call_id(JObj)});
 call_event(FSM, <<"call_event">>, <<"DTMF">>, EvtJObj) ->
     gen_fsm:send_event(FSM, {'dtmf_pressed', wh_json:get_value(<<"DTMF-Digit">>, EvtJObj)});
 call_event(FSM, <<"call_event">>, <<"CHANNEL_EXECUTE_COMPLETE">>, JObj) ->
@@ -179,7 +179,12 @@ call_event(FSM, <<"error">>, <<"dialplan">>, JObj) ->
     Req = wh_json:get_value(<<"Request">>, JObj),
 
     gen_fsm:send_event(FSM, {'dialplan_error', wh_json:get_value(<<"Application-Name">>, Req)});
-call_event(_, _C, _E, _) -> 'ok'.
+call_event(FSM, <<"call_event">>, <<"CHANNEL_REPLACED">>, JObj) ->
+    gen_fsm:send_event(FSM, {'channel_replaced', JObj});
+call_event(FSM, <<"call_event">>, <<"CHANNEL_TRANSFEREE">>, JObj) ->
+    gen_fsm:send_event(FSM, {'channel_unbridged', call_id(JObj)});
+call_event(_, _C, _E, _) ->
+    lager:info("Unhandled combo: ~s/~s", [_C, _E]).
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -187,9 +192,14 @@ call_event(_, _C, _E, _) -> 'ok'.
 %%--------------------------------------------------------------------
 -spec maybe_send_execute_complete(pid(), ne_binary(), wh_json:object()) -> 'ok'.
 maybe_send_execute_complete(FSM, <<"bridge">>, JObj) ->
-    gen_fsm:send_event(FSM, {'channel_unbridged', callid(JObj)});
+    lager:info("Send EXECUTE_COMPLETE,bridge to ~p with ci: ~s, olci: ~s",
+               [FSM
+                ,call_id(JObj)
+                ,kz_call_event:other_leg_call_id(JObj)
+               ]),
+    gen_fsm:send_event(FSM, {'channel_unbridged', call_id(JObj)});
 maybe_send_execute_complete(FSM, <<"call_pickup">>, JObj) ->
-    gen_fsm:send_event(FSM, {'channel_bridged', callid(JObj)});
+    gen_fsm:send_event(FSM, {'channel_bridged', call_id(JObj)});
 maybe_send_execute_complete(_, _, _) -> 'ok'.
 
 %%--------------------------------------------------------------------
@@ -893,6 +903,16 @@ answered({'channel_bridged', CallId}, #state{agent_call_id=CallId
     acdc_agent_listener:member_connect_accepted(AgentListener, CallId),
     maybe_notify(Ns, ?NOTIFY_PICKUP, State),
     {'next_state', 'answered', State};
+answered({'channel_replaced', JObj}, #state{agent_listener=AgentListener}=State) ->
+    CallId = kz_call_event:call_id(JObj),
+    ReplacedBy = kz_call_event:replaced_by(JObj),
+    acdc_agent_listener:rebind_events(AgentListener, CallId, ReplacedBy),
+    wh_util:put_callid(ReplacedBy),
+    lager:info("channel ~s replaced by ~s", [CallId, ReplacedBy]),
+    {'next_state', 'answered', State#state{member_call_id = ReplacedBy}};
+answered({'channel_hungup', CallId, <<"ATTENDED_TRANSFER">> = _Cause}, #state{member_call_id = CallId}=State) ->
+    lager:info("caller's channel hung up: ~s", [_Cause]),
+    {'next_state', 'answered', State};
 answered({'channel_hungup', CallId, _Cause}, #state{member_call_id=CallId}=State) ->
     lager:debug("caller's channel hung up: ~s", [_Cause]),
     {'next_state', 'wrapup', State#state{wrapup_ref=hangup_call(State)}};
@@ -910,10 +930,10 @@ answered({'sync_req', JObj}, #state{agent_listener=AgentListener
     acdc_agent_listener:send_sync_resp(AgentListener, 'answered', JObj, [{<<"Call-ID">>, CallId}]),
     {'next_state', 'answered', State};
 answered({'channel_unbridged', CallId}, #state{member_call_id=CallId}=State) ->
-    lager:debug("caller channel unbridged"),
-    {'next_state', 'wrapup', State#state{wrapup_ref=hangup_call(State)}};
+    lager:info("caller channel ~s unbridged", [CallId]),
+    {'next_state', 'wrapup', State#state{wrapup_ref=wrapup_timer(State)}};
 answered({'channel_unbridged', CallId}, #state{agent_call_id=CallId}=State) ->
-    lager:debug("agent channel unbridged"),
+    lager:info("agent channel unbridged"),
     {'next_state', 'wrapup', State#state{wrapup_ref=hangup_call(State)}};
 answered({'channel_answered', MemberCallId}, #state{member_call_id=MemberCallId}=State) ->
     lager:debug("member's channel has answered"),
@@ -1340,8 +1360,8 @@ start_pause_timer(0) -> 'undefined';
 start_pause_timer(Timeout) ->
     gen_fsm:start_timer(Timeout * 1000, ?PAUSE_MESSAGE).
 
--spec callid(wh_json:object()) -> api_binary().
-callid(JObj) ->
+-spec call_id(wh_json:object()) -> api_binary().
+call_id(JObj) ->
     case wh_json:get_value(<<"Call-ID">>, JObj) of
         'undefined' -> wh_json:get_value([<<"Call">>, <<"Call-ID">>], JObj);
         CallId -> CallId
@@ -1355,6 +1375,7 @@ hangup_cause(JObj) ->
     end.
 
 %% returns time left in seconds
+-spec time_left(reference() | 'false' | api_integer()) -> api_integer().
 time_left(Ref) when is_reference(Ref) ->
     time_left(erlang:read_timer(Ref));
 time_left('false') -> 'undefined';
@@ -1418,29 +1439,37 @@ current_call(Call, AgentState, QueueId, Start) ->
                        ,{<<"queue_id">>, QueueId}
                       ]).
 
+-spec elapsed('undefined' | wh_now()) -> api_integer().
 elapsed('undefined') -> 'undefined';
 elapsed(Start) -> wh_util:elapsed_s(Start).
 
-hangup_call(#state{wrapup_timeout=WrapupTimeout
-                   ,agent_listener=AgentListener
+-spec wrapup_timer(fsm_state()) -> reference().
+wrapup_timer(#state{agent_listener=AgentListener
+                    ,wrapup_timeout = WrapupTimeout
+                    ,account_id = AccountId
+                    ,agent_id = AgentId
+                    ,member_call_id = CallId
+                    ,member_call_start=_Started
+                   }) ->
+    acdc_agent_listener:unbind_from_events(AgentListener, CallId),
+    lager:info("call lasted ~b s", [elapsed(_Started)]),
+    lager:info("going into a wrapup period ~p: ~s", [WrapupTimeout, CallId]),
+    acdc_agent_stats:agent_wrapup(AccountId, AgentId, WrapupTimeout),
+    start_wrapup_timer(WrapupTimeout).
+
+-spec hangup_call(fsm_state()) -> reference().
+hangup_call(#state{agent_listener=AgentListener
                    ,member_call_id=CallId
                    ,member_call_queue_id=QueueId
-                   ,member_call_start=_Started
                    ,account_id=AccountId
                    ,agent_id=AgentId
                    ,queue_notifications=Ns
                   }=State) ->
-    lager:debug("call lasted ~b s", [elapsed(_Started)]),
-    lager:debug("going into a wrapup period ~p: ~s", [WrapupTimeout, CallId]),
-
     acdc_stats:call_processed(AccountId, QueueId, AgentId, CallId),
 
     acdc_agent_listener:channel_hungup(AgentListener, CallId),
-
     maybe_notify(Ns, ?NOTIFY_HANGUP, State),
-
-    acdc_agent_stats:agent_wrapup(AccountId, AgentId, WrapupTimeout),
-    start_wrapup_timer(WrapupTimeout).
+    wrapup_timer(State).
 
 -spec maybe_stop_timer(reference() | 'undefined') -> 'ok'.
 -spec maybe_stop_timer(reference() | 'undefined', boolean()) -> 'ok'.
@@ -1501,7 +1530,7 @@ missed_reason(Reason) -> Reason.
 
 -spec find_username(wh_json:object()) -> api_binary().
 find_username(EP) ->
-    find_sip_username(EP, wh_json:get_value([<<"sip">>, <<"username">>], EP)).
+    find_sip_username(EP, kz_device:sip_username(EP)).
 
 -spec find_sip_username(wh_json:object(), api_binary()) -> api_binary().
 find_sip_username(EP, 'undefined') -> wh_json:get_value(<<"To-User">>, EP);

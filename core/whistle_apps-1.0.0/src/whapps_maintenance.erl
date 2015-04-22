@@ -648,19 +648,27 @@ ensure_aggregate_device(Account) ->
 refresh_account_devices(AccountDb, AccountRealm, Devices) ->
     [whapps_util:add_aggregate_device(AccountDb, wh_json:get_value(<<"doc">>, Device))
      || Device <- Devices,
-        wh_json:get_ne_value([<<"doc">>, <<"sip">>, <<"realm">>], Device, AccountRealm) =/= AccountRealm
-            orelse wh_json:get_ne_value([<<"doc">>, <<"sip">>, <<"ip">>], Device, 'undefined') =/= 'undefined'
+        should_aggregate_device(AccountRealm, wh_json:get_value(<<"doc">>, Device))
     ],
     'ok'.
+
+-spec should_aggregate_device(ne_binary(), wh_json:object()) -> boolean().
+should_aggregate_device(AccountRealm, Device) ->
+    kz_device:sip_realm(Device, AccountRealm) =/= AccountRealm
+        orelse kz_device:sip_ip(Device) =/= 'undefined'.
 
 -spec remove_aggregate_devices(ne_binary(), ne_binary(), wh_json:objects()) -> 'ok'.
 remove_aggregate_devices(AccountDb, AccountRealm, Devices) ->
     [whapps_util:rm_aggregate_device(AccountDb, wh_json:get_value(<<"doc">>, Device))
      || Device <- Devices,
-        wh_json:get_ne_value([<<"doc">>, <<"sip">>, <<"realm">>], Device, AccountRealm) =:= AccountRealm
-            andalso wh_json:get_ne_value([<<"doc">>, <<"sip">>, <<"ip">>], Device, 'undefined') =:= 'undefined'
+        should_remove_aggregate(AccountRealm, wh_json:get_value(<<"doc">>, Device))
     ],
     'ok'.
+
+-spec should_remove_aggregate(ne_binary(), wh_json:object()) -> boolean().
+should_remove_aggregate(AccountRealm, Device) ->
+    kz_device:sip_realm(Device, AccountRealm) =:= AccountRealm
+        andalso kz_device:sip_ip(Device) =:= 'undefined'.
 
 %%--------------------------------------------------------------------
 %% @public
@@ -743,29 +751,40 @@ remove_deprecated_attachment_properties(AccountDb, Id, JObj) ->
 migrate_attachment(AccountDb, JObj, Attachment, MetaData) ->
     DocCT = wh_json:get_value(<<"content_type">>, JObj),
     MetaCT = wh_json:get_value(<<"content_type">>, MetaData),
-    Migrations = [fun({A, _CT}) ->
-                          case {is_audio_content(DocCT), is_audio_content(MetaCT)} of
-                              {_, 'true'} -> {A, MetaCT};
-                              {'true', _} -> {A, DocCT};
-                              {_, _} ->
-                                  Ext = wh_util:to_list(filename:extension(A)),
-                                  case mochiweb_mime:from_extension(Ext) of
-                                      'undefined' -> {A, <<"audio/mpeg">>};
-                                      MIME -> {A, wh_util:to_binary(MIME)}
-                                  end
-                          end
-                  end
-                  ,fun({A, CT}) ->
-                           case wh_util:is_empty(filename:extension(A)) of
-                               'false' -> {A, CT};
-                               'true' -> {add_extension(A, CT), CT}
-                           end
-                   end],
+    Migrations = [fun({A, MCT}) -> maybe_update_attachment_content_type(A, MCT, DocCT) end
+                  ,fun maybe_add_extension/1
+                 ],
+
     Migrate = lists:foldl(fun(F, Acc) -> F(Acc) end
                           ,{Attachment, MetaCT}
-                          ,Migrations),
+                          ,Migrations
+                         ),
+
     Id = wh_json:get_value(<<"_id">>, JObj),
     maybe_update_attachment(AccountDb, Id, {Attachment, MetaCT}, Migrate).
+
+maybe_update_attachment_content_type(A, MCT, DocCT) ->
+    case {is_audio_content(DocCT), is_audio_content(MCT)} of
+        {_, 'true'} -> {A, MCT};
+        {'true', 'false'} -> {A, DocCT};
+        {'false', 'false'} ->
+            {A, find_attachment_content_type(A)}
+    end.
+
+-spec find_attachment_content_type(ne_binary()) -> ne_binary().
+find_attachment_content_type(A) ->
+    try cow_mimetypes:all(A) of
+        {Type, SubType, _Options} -> wh_util:join_binary([Type, SubType], <<"/">>)
+    catch
+        'error':'function_clause' -> <<"audio/mpeg">>
+    end.
+
+-spec maybe_add_extension({ne_binary(), ne_binary()}) -> {ne_binary(), ne_binary()}.
+maybe_add_extension({A, CT}) ->
+    case wh_util:is_empty(filename:extension(A)) of
+        'false' -> {A, CT};
+        'true' -> {add_extension(A, CT), CT}
+    end.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -775,9 +794,8 @@ migrate_attachment(AccountDb, JObj, Attachment, MetaData) ->
 %%--------------------------------------------------------------------
 -type attachment_and_content() :: {ne_binary(), ne_binary()}.
 -spec maybe_update_attachment(ne_binary(), ne_binary(), attachment_and_content(), attachment_and_content()) -> 'ok'.
-maybe_update_attachment(_, _, {Attachment, CT}, {Attachment, CT}) ->
-    'ok';
-maybe_update_attachment(AccountDb, Id, {OrigAttch, _CT1}, {NewAttch, CT}) ->
+maybe_update_attachment(_, _, {Attachment, CT}, {Attachment, CT}) -> 'ok';
+maybe_update_attachment(AccountDb, Id, {OrigAttach, _CT1}, {NewAttach, CT}) ->
     %% this preforms the following:
     %% 1. Get the current attachment
     %% 2. Fix the name and content type then put the new attachment on the doc
@@ -785,58 +803,66 @@ maybe_update_attachment(AccountDb, Id, {OrigAttch, _CT1}, {NewAttch, CT}) ->
     %% 4. Remove the original (erronous) attachment
     %% However, if it failes at any of those stages it will leave the media doc with multiple
     %%    attachments and require manual intervention
-    Updaters = [fun(_) ->
-                        case couch_mgr:fetch_attachment(AccountDb, Id, OrigAttch) of
-                            {'ok', _}=Ok -> Ok;
-                            {'error', _}=E ->
-                                io:format("unable to fetch attachment ~s/~s/~s: ~p~n", [AccountDb, Id, OrigAttch, E]),
-                                E
-                        end
-                end
-                ,fun({'ok', Content1}) ->
-                         {'ok', Rev} = couch_mgr:lookup_doc_rev(AccountDb, Id),
-                         Options = [{'headers', [{'content_type', wh_util:to_list(CT)}]}
-                                    ,{'rev', Rev}
-                                   ],
-                         %% bigcouch is awesome in that it sometimes returns 409 (conflict) but does the work anyway..
-                         %%   so rather than check the put return fetch the new attachment and compare it to the old
-                         Result = couch_mgr:put_attachment(AccountDb, Id, NewAttch, Content1, Options),
-                         {'ok', JObj} = couch_mgr:open_doc(AccountDb, Id),
-
-                         case wh_doc:attachment_length(JObj, OrigAttch)
-                             =:= wh_doc:attachment_length(JObj, NewAttch)
-                         of
-                             'false' ->
-                                 io:format("unable to put new attachment ~s/~s/~s: ~p~n", [AccountDb, Id, NewAttch, Result]),
-                                 {'error', 'length_mismatch'};
-                             'true' ->
-                                 Filename = wh_util:to_list(<<"/tmp/media_", Id/binary, "_", OrigAttch/binary>>),
-                                 case file:write_file(Filename, Content1) of
-                                     'ok' -> 'ok';
-                                     {'error', _}=E2 ->
-                                         io:format("unable to backup attachment ~s/~s/~s: ~p~n", [AccountDb, Id, NewAttch, E2]),
-                                         E2
-                                 end
-                         end
+    Updaters = [fun(_) -> try_load_attachment(AccountDb, Id, OrigAttach) end
+                ,fun(Content1) ->
+                         maybe_resave_attachment(Content1, AccountDb, Id, OrigAttach, NewAttach, CT)
                  end
-                ,fun('ok') ->
-                         case OrigAttch =/= NewAttch of
-                             'true' ->
-                                 case couch_mgr:delete_attachment(AccountDb, Id, OrigAttch) of
-                                     {'ok', _} ->
-                                         io:format("updated attachment name ~s/~s/~s~n", [AccountDb, Id, NewAttch]),
-                                         'ok';
-                                     {'error', _}=E ->
-                                         io:format("unable to remove original attachment ~s/~s/~s: ~p~n", [AccountDb, Id, OrigAttch, E]),
-                                         'error'
-                                 end;
-                             'false' ->
-                                 io:format("updated content type for ~s/~s/~s~n", [AccountDb, Id, NewAttch]),
-                                 'ok'
-                         end
+                ,fun(_) ->
+                         maybe_cleanup_old_attachment(AccountDb, Id, OrigAttach, NewAttach)
                  end
                ],
-    lists:foldl(fun(F, A) -> F(A) end, [], Updaters).
+    lists:foldl(fun(F, Acc) -> F(Acc) end, [], Updaters).
+
+-spec try_load_attachment(ne_binary(), ne_binary(), ne_binary()) ->
+                                 binary().
+try_load_attachment(AccountDb, Id, OrigAttach) ->
+    case couch_mgr:fetch_attachment(AccountDb, Id, OrigAttach) of
+        {'ok', Content} -> Content;
+        {'error', _R}=E ->
+            io:format("unable to fetch attachment ~s/~s/~s: ~p~n", [AccountDb, Id, OrigAttach, _R]),
+            throw(E)
+    end.
+
+-spec maybe_resave_attachment(binary(), ne_binary(), ne_binary(), ne_binary(), ne_binary(), ne_binary()) ->
+                                     'ok'.
+maybe_resave_attachment(Content1, AccountDb, Id, OrigAttach, NewAttach, CT) ->
+    {'ok', Rev} = couch_mgr:lookup_doc_rev(AccountDb, Id),
+    Options = [{'headers', [{'content_type', wh_util:to_list(CT)}]}
+               ,{'rev', Rev}
+              ],
+    %% bigcouch is awesome in that it sometimes returns 409 (conflict) but does the work anyway..
+    %%   so rather than check the put return fetch the new attachment and compare it to the old
+    Result = couch_mgr:put_attachment(AccountDb, Id, NewAttach, Content1, Options),
+    {'ok', JObj} = couch_mgr:open_doc(AccountDb, Id),
+
+    case wh_doc:attachment_length(JObj, OrigAttach)
+        =:= wh_doc:attachment_length(JObj, NewAttach)
+    of
+        'false' ->
+            io:format("unable to put new attachment ~s/~s/~s: ~p~n", [AccountDb, Id, NewAttach, Result]),
+            throw({'error', 'length_mismatch'});
+        'true' ->
+            Filename = wh_util:to_list(<<"/tmp/media_", Id/binary, "_", OrigAttach/binary>>),
+            case file:write_file(Filename, Content1) of
+                'ok' -> 'ok';
+                {'error', _R}=E2 ->
+                    io:format("unable to backup attachment ~s/~s/~s: ~p~n", [AccountDb, Id, NewAttach, _R]),
+                    throw(E2)
+            end
+    end.
+
+-spec maybe_cleanup_old_attachment(ne_binary(), ne_binary(), ne_binary(), ne_binary()) -> 'ok'.
+maybe_cleanup_old_attachment(_AccountDb, _Id, NewAttach, NewAttach) ->
+    io:format("updated content type for ~s/~s/~s~n", [_AccountDb, _Id, NewAttach]);
+maybe_cleanup_old_attachment(AccountDb, Id, OrigAttach, NewAttach) ->
+    case couch_mgr:delete_attachment(AccountDb, Id, OrigAttach) of
+        {'ok', _} ->
+            io:format("updated attachment name ~s/~s/~s~n", [AccountDb, Id, NewAttach]),
+            'ok';
+        {'error', _R}=E ->
+            io:format("unable to remove original attachment ~s/~s/~s: ~p~n", [AccountDb, Id, OrigAttach, _R]),
+            throw(E)
+    end.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -879,7 +905,7 @@ is_audio_content(_) -> 'false'.
 %%--------------------------------------------------------------------
 -spec maybe_delete_db(ne_binary()) -> 'ok'.
 maybe_delete_db(Database) ->
-    case whapps_config:get_is_true(<<"whistle_couch">>, <<"allow_maintenance_db_delete">>, 'false') of
+    case whapps_config:get_is_true(?SYSCONFIG_COUCH, <<"allow_maintenance_db_delete">>, 'false') of
         'true' ->
             lager:warning("deleting database ~s", [Database]),
             couch_mgr:db_delete(Database);
@@ -904,16 +930,26 @@ maybe_delete_db(Database) ->
 purge_doc_type([], _Account) -> 'ok';
 purge_doc_type([Type|Types], Account) ->
     _ = purge_doc_type(Type, Account),
-    purge_doc_type(Types, Account, whapps_config:get_integer(<<"whistle_couch">>, <<"default_chunk_size">>, 1000));
+    purge_doc_type(Types
+                   ,Account
+                   ,whapps_config:get_integer(?SYSCONFIG_COUCH, <<"default_chunk_size">>, 1000)
+                  );
 purge_doc_type(Type, Account) when not is_binary(Type) ->
-    purge_doc_type(wh_util:to_binary(Type), Account, whapps_config:get_integer(<<"whistle_couch">>, <<"default_chunk_size">>, 1000));
+    purge_doc_type(wh_util:to_binary(Type)
+                   ,Account
+                   ,whapps_config:get_integer(?SYSCONFIG_COUCH, <<"default_chunk_size">>, 1000)
+                  );
 purge_doc_type(Type, Account) when not is_binary(Account) ->
-    purge_doc_type(Type, wh_util:to_binary(Account), whapps_config:get_integer(<<"whistle_couch">>, <<"default_chunk_size">>, 1000)).
+    purge_doc_type(Type
+                   ,wh_util:to_binary(Account)
+                   ,whapps_config:get_integer(?SYSCONFIG_COUCH, <<"default_chunk_size">>, 1000)
+                  ).
+
 purge_doc_type(Type, Account, ChunkSize) ->
     Db = wh_util:format_account_id(Account, 'encoded'),
     Opts = [{'key', Type}
-           ,{'limit', ChunkSize}
-           ,'include_docs'
+            ,{'limit', ChunkSize}
+            ,'include_docs'
            ],
     case couch_mgr:get_results(Db, <<"maintenance/listing_by_type">>, Opts) of
         {'error', _}=E -> E;
@@ -943,6 +979,7 @@ call_id_status(CallId, Verbose) ->
             lager:info("failed to get status of '~s': '~p'", [CallId, _E])
     end.
 
+-spec show_status(ne_binary(), boolean(), api_terms()) -> 'ok'.
 show_status(CallId, 'false', Resp) ->
     lager:info("channel '~s' has status '~s'", [CallId, wapi_call:get_status(Resp)]);
 show_status(CallId, 'true', Resp) ->
@@ -955,7 +992,14 @@ show_status(CallId, 'true', Resp) ->
 -spec delete_system_media_references() -> 'ok'.
 delete_system_media_references() ->
     DocId = wh_call_response:config_doc_id(),
-    {'ok', CallResponsesDoc} = couch_mgr:open_doc(?WH_CONFIG_DB, DocId),
+    case couch_mgr:open_doc(?WH_CONFIG_DB, DocId) of
+        {'ok', CallResponsesDoc} ->
+            delete_system_media_references(DocId, CallResponsesDoc);
+        {'error', 'not_found'} -> ok
+    end.
+
+-spec delete_system_media_references(ne_binary(), wh_json:object()) -> 'ok'.
+delete_system_media_references(DocId, CallResponsesDoc) ->
     TheKey = <<"default">>,
     Default = wh_json:get_value(TheKey, CallResponsesDoc),
 
@@ -964,9 +1008,9 @@ delete_system_media_references() ->
         NewDefault ->
            io:format("updating ~s with stripped system_media references~n", [DocId]),
             NewCallResponsesDoc = wh_json:set_value(TheKey, NewDefault, CallResponsesDoc),
-            _Resp = couch_mgr:save_doc(?WH_CONFIG_DB, NewCallResponsesDoc)
-    end,
-    'ok'.
+            _Resp = couch_mgr:save_doc(?WH_CONFIG_DB, NewCallResponsesDoc),
+            'ok'
+    end.
 
 -spec remove_system_media_refs(wh_json:key(), wh_json:json_term()) ->
                                       {wh_json:key(), wh_json:json_term()}.

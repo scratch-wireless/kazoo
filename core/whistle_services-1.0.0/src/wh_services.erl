@@ -785,9 +785,10 @@ reset_category(Category, #wh_services{updates=JObj}=Services) ->
 %% @end
 %%--------------------------------------------------------------------
 -spec is_reseller(ne_binary() | services()) -> boolean().
-is_reseller(Account) ->
-    Service = public_json(Account),
-    wh_json:is_true(<<"reseller">>, Service).
+is_reseller(#wh_services{jobj=ServicesJObj}) ->
+    wh_json:is_true(<<"pvt_reseller">>, ServicesJObj);
+is_reseller(<<_/binary>> = Account) ->
+    is_reseller(fetch(Account)).
 
 %%--------------------------------------------------------------------
 %% @public
@@ -921,7 +922,7 @@ dry_run_activation_charges(Category, CategoryJObj, Services, Transactions) ->
 dry_run_activation_charges(Category, Class, Quantity, #wh_services{jobj=JObj}=Services, Transactions) ->
     case wh_json:get_value([?QUANTITIES, Category, Class], JObj, 0) of
         Quantity -> Transactions;
-        _OldQ ->
+        OldQuantity ->
             AccountId = wh_services:account_id(Services),
             Amount = wht_util:dollars_to_units(activation_charges(Category, Class, Services)),
             MetaData =
@@ -932,7 +933,7 @@ dry_run_activation_charges(Category, Class, Quantity, #wh_services{jobj=JObj}=Se
             Transaction =
                 wh_transaction:set_metadata(
                   MetaData
-                  ,wh_transaction:debit(AccountId, Amount*Quantity)
+                  ,wh_transaction:debit(AccountId, Amount*(Quantity-OldQuantity))
                  ),
             [Transaction|Transactions]
     end.

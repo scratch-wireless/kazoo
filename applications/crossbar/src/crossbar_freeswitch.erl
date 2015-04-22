@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%%% @copyright (C) 2011-2013, 2600Hz
+%%% @copyright (C) 2011-2015, 2600Hz INC
 %%% @doc
 %%%
 %%% Create freeswitch offline configuration
@@ -301,10 +301,8 @@ crawl_numbers_db(NumberDb) ->
             maybe_export_numbers(Db, Numbers);
         {'error', _R} ->
             lager:debug("error getting number docs from ~s: ~p"
-                        ,[NumberDb, _R]);
-        _Else ->
-            lager:debug("unexpected return getting number docs from ~s: ~p"
-                        ,[NumberDb, _Else])
+                        ,[NumberDb, _R]
+                       )
     catch
          _E:_R ->
             lager:debug("~s getting number docs from ~s: ~p"
@@ -425,8 +423,8 @@ process_callflow(_, _, _, _) -> 'ok'.
                             'ok' | {'error', _}.
 process_device(Number, AccountId, JObj) ->
     AccountRealm = wh_util:get_account_realm(AccountId),
-    Realm = wh_json:get_value([<<"sip">>,<<"realm">>], JObj, AccountRealm),
-    Username = wh_json:get_value([<<"sip">>,<<"username">>], JObj),
+    Realm = kz_device:sip_realm(JObj, AccountRealm),
+    Username = kz_device:sip_username(JObj),
     case query_registrar(Realm, Username) of
         {'ok', Auth} ->
             Props = props_for_rendering(Number, Username, Realm, Auth),

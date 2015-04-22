@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%%% @copyright (C) 2010-2014, 2600Hz
+%%% @copyright (C) 2010-2015, 2600Hz
 %%% @doc
 %%%
 %%% @end
@@ -72,6 +72,11 @@
 -export([descendants_count/0, descendants_count/1]).
 
 -export([format_emergency_caller_id_number/1]).
+
+-export([get_devices_by_owner/2]).
+-export([maybe_refresh_fs_xml/2
+         ,refresh_fs_xml/1
+        ]).
 
 -include("crossbar.hrl").
 
@@ -375,24 +380,30 @@ flush_registration(Username, Context) ->
 -spec move_account(ne_binary(), ne_binary()) ->
                           {'ok', wh_json:object()} |
                           {'error',any()}.
+-spec move_account(ne_binary(), ne_binary(), wh_json:object(), ne_binaries()) ->
+                          {'ok', wh_json:object()} |
+                          {'error',any()}.
 move_account(<<_/binary>> = AccountId, <<_/binary>> = ToAccount) ->
     AccountDb = wh_util:format_account_id(AccountId, 'encoded'),
     case validate_move(AccountId, ToAccount, AccountDb) of
         {'error', _E}=Error -> Error;
         {'ok', JObj, ToTree} ->
-            PreviousTree = wh_json:get_value(<<"pvt_tree">>, JObj, []),
-            JObj1 = wh_json:set_values([{<<"pvt_tree">>, ToTree}
-                                        ,{<<"pvt_previous_tree">>, PreviousTree}
-                                        ,{<<"pvt_modified">>, wh_util:current_tstamp()}
-                                       ], JObj),
-            case couch_mgr:save_doc(AccountDb, JObj1) of
-                {'error', _E}=Error -> Error;
-                {'ok', _} ->
-                    {'ok', _} = replicate_account_definition(JObj1),
-                    {'ok', _} = move_descendants(AccountId, ToTree),
-                    {'ok', _} = mark_dirty(AccountId),
-                    move_service(AccountId, ToTree, 'true')
-            end
+            move_account(AccountId, AccountDb, JObj, ToTree)
+    end.
+
+move_account(AccountId, AccountDb, JObj, ToTree) ->
+    PreviousTree = kz_account:tree(JObj),
+    JObj1 = wh_json:set_values([{<<"pvt_tree">>, ToTree}
+                                ,{<<"pvt_previous_tree">>, PreviousTree}
+                                ,{<<"pvt_modified">>, wh_util:current_tstamp()}
+                               ], JObj),
+    case couch_mgr:save_doc(AccountDb, JObj1) of
+        {'error', _E}=Error -> Error;
+        {'ok', _} ->
+            {'ok', _} = replicate_account_definition(JObj1),
+            {'ok', _} = move_descendants(AccountId, ToTree),
+            {'ok', _} = mark_dirty(AccountId),
+            move_service(AccountId, ToTree, 'true')
     end.
 
 %%--------------------------------------------------------------------
@@ -404,7 +415,7 @@ move_account(<<_/binary>> = AccountId, <<_/binary>> = ToAccount) ->
                            {'error', _} |
                            {'ok', wh_json:object(), ne_binaries()}.
 validate_move(AccountId, ToAccount, AccountDb) ->
-    case couch_mgr:open_doc(AccountDb, AccountId) of
+    case couch_mgr:open_cache_doc(AccountDb, AccountId) of
         {'error', _E}=Error -> Error;
         {'ok', JObj} ->
             ToTree = lists:append(get_tree(ToAccount), [ToAccount]),
@@ -435,7 +446,7 @@ update_descendants_tree([Descendant|Descendants], Tree) ->
     case couch_mgr:open_doc(AccountDb, AccountId) of
         {'error', _E}=Error -> Error;
         {'ok', JObj} ->
-            PreviousTree = wh_json:get_value(<<"pvt_tree">>, JObj, []),
+            PreviousTree = kz_account:tree(JObj),
             {_, Tail} = lists:split(erlang:length(Tree), PreviousTree),
             ToTree = Tree ++ Tail,
             JObj1 = wh_json:set_values([{<<"pvt_tree">>, ToTree}
@@ -463,17 +474,22 @@ move_service(AccountId, NewTree, Dirty) ->
     case couch_mgr:open_doc(?WH_SERVICES_DB, AccountId) of
         {'error', _E}=Error -> Error;
         {'ok', JObj} ->
-            PreviousTree = wh_json:get_value(<<"pvt_tree">>, JObj),
-            Props = props:filter_undefined([{<<"pvt_tree">>, NewTree}
-                                            ,{<<"pvt_dirty">>, Dirty}
-                                            ,{<<"pvt_previous_tree">>, PreviousTree}
-                                            ,{<<"pvt_modified">>, wh_util:current_tstamp()}
-                                           ]),
-            JObj1 = wh_json:set_values(Props, JObj),
-            case couch_mgr:save_doc(?WH_SERVICES_DB, JObj1) of
-                {'error', _E}=Error -> Error;
-                {'ok', _R}=Ok -> Ok
-            end
+            move_service_doc(NewTree, Dirty, JObj)
+    end.
+
+-spec move_service_doc(ne_binaries(), api_boolean(), wh_json:object()) ->
+                          {'ok', wh_json:object()} |
+                          {'error', _}.
+move_service_doc(NewTree, Dirty, JObj) ->
+    PreviousTree = kz_account:tree(JObj),
+    Props = props:filter_undefined([{<<"pvt_tree">>, NewTree}
+                                    ,{<<"pvt_dirty">>, Dirty}
+                                    ,{<<"pvt_previous_tree">>, PreviousTree}
+                                    ,{<<"pvt_modified">>, wh_util:current_tstamp()}
+                                   ]),
+    case couch_mgr:save_doc(?WH_SERVICES_DB, wh_json:set_values(Props, JObj)) of
+        {'error', _E}=Error -> Error;
+        {'ok', _R}=Ok -> Ok
     end.
 
 %%--------------------------------------------------------------------
@@ -489,19 +505,20 @@ get_descendants(<<_/binary>> = AccountId) ->
                   ],
     case couch_mgr:get_results(?WH_ACCOUNTS_DB, <<"accounts/listing_by_descendants">>, ViewOptions) of
         {'ok', JObjs} ->
-            lists:foldl(
-              fun(JObj, Acc) ->
-                      case wh_json:get_value(<<"id">>, JObj) of
-                          AccountId -> Acc;
-                          Id -> [Id | Acc]
-                      end
-              end
-              ,[]
-              ,JObjs
-             );
+            lists:foldl(fun(JObj, Acc) -> filter_by_account_id(JObj, Acc, AccountId) end
+                        ,[]
+                        ,JObjs
+                       );
         {'error', _R} ->
             lager:debug("unable to get descendants of ~s: ~p", [AccountId, _R]),
             []
+    end.
+
+-spec filter_by_account_id(wh_json:object(), ne_binaries(), ne_binary()) -> ne_binaries().
+filter_by_account_id(JObj, Acc, AccountId) ->
+    case wh_json:get_value(<<"id">>, JObj) of
+        AccountId -> Acc;
+        Id -> [Id | Acc]
     end.
 
 -spec mark_dirty(ne_binary() | wh_json:object()) -> wh_std_return().
@@ -528,7 +545,7 @@ get_tree(<<_/binary>> = Account) ->
     AccountId = wh_util:format_account_id(Account, 'raw'),
     AccountDb = wh_util:format_account_id(Account, 'encoded'),
     case couch_mgr:open_cache_doc(AccountDb, AccountId) of
-        {'ok', JObj} -> wh_json:get_value(<<"pvt_tree">>, JObj, []);
+        {'ok', JObj} -> kz_account:tree(JObj);
         {'error', _E} ->
             lager:error("could not load ~s in ~s: ~p", [AccountId, AccountDb, _E]),
             []
@@ -644,14 +661,8 @@ load_apps(AccountId, UserId) ->
     FilteredApps = filter_apps(Apps, AccountId, UserId),
     format_apps(AccountId, UserId, FilteredApps).
 
-%%--------------------------------------------------------------------
 %% @private
-%% @doc
-%% @end
-%%--------------------------------------------------------------------
 -spec filter_apps(wh_json:objects(), ne_binary(), ne_binary()) ->
-                         wh_json:objects().
--spec filter_apps(wh_json:objects(), wh_json:object(), ne_binary(), wh_json:objects()) ->
                          wh_json:objects().
 filter_apps(Apps, AccountId, UserId) ->
     AccountDb = wh_util:format_account_id(AccountId, 'encoded'),
@@ -660,16 +671,10 @@ filter_apps(Apps, AccountId, UserId) ->
             lager:error("failed to load account ~s", [AccountId]),
             Apps;
         {'ok', AccountDoc} ->
-            filter_apps(Apps, AccountDoc, UserId, [])
-    end.
-
-filter_apps([], _, _, Acc) -> Acc;
-filter_apps([App|Apps], AccountDoc, UserId, Acc) ->
-    case is_authorized(AccountDoc, UserId, App) of
-        'false' ->
-            filter_apps(Apps, AccountDoc, UserId, Acc);
-        'true' ->
-            filter_apps(Apps, AccountDoc, UserId, [App|Acc])
+            OnlyAuthorized = fun(App) ->
+                                     cb_apps_util:is_authorized(AccountDoc, UserId, App)
+                             end,
+            lists:filter(OnlyAuthorized, Apps)
     end.
 
 %%--------------------------------------------------------------------
@@ -677,30 +682,8 @@ filter_apps([App|Apps], AccountDoc, UserId, Acc) ->
 %% @doc
 %% @end
 %%--------------------------------------------------------------------
--spec is_authorized(wh_json:object(), ne_binary(), wh_json:object()) -> boolean().
-is_authorized(AccountDoc, UserId, App) ->
-    AppId = wh_doc:id(App),
-    JObj = wh_json:get_value([<<"apps">>, AppId], AccountDoc),
-    Allowed = wh_json:get_value(<<"allowed_users">>, JObj, <<"specific">>),
-    Users = wh_json:get_value(<<"users">>, JObj, []),
-    case {Allowed, Users} of
-        {<<"all">>, _} -> 'true';
-        {<<"specific">>, []} -> 'false';
-        {<<"specific">>, Users} when is_list(Users)->
-            lists:member(UserId, Users);
-        {<<"admins">>, _} ->
-            wh_util:is_system_admin(wh_doc:id(AccountDoc));
-        {_A, _U} ->
-            lager:error("unknown data ~p : ~p", [_A, _U]),
-            'false'
-    end.
-
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% @end
-%%--------------------------------------------------------------------
--spec format_apps(wh_json:objects() | ne_binary(), ne_binary(), wh_json:objects()) -> wh_json:objects().
+-spec format_apps(wh_json:objects() | ne_binary(), ne_binary(), wh_json:objects()) ->
+                         wh_json:objects().
 format_apps([], _, Acc) -> Acc;
 format_apps(AccountId, UserId, JObjs) when is_binary(AccountId) ->
     Lang = get_language(AccountId, UserId),
@@ -871,7 +854,7 @@ maybe_remove_attachments(Context) ->
              )
     end.
 
--spec create_auth_token(cb_context:context(), atom()) -> cb_context:context().
+-spec create_auth_token(cb_context:context(), atom() | ne_binary()) -> cb_context:context().
 create_auth_token(Context, Method) ->
     JObj = cb_context:doc(Context),
     case wh_json:is_empty(JObj) of
@@ -879,39 +862,42 @@ create_auth_token(Context, Method) ->
             lager:debug("empty doc, no auth token created"),
             ?MODULE:response('error', <<"invalid credentials">>, 401, Context);
         'false' ->
-            Data = cb_context:req_data(Context),
+            create_auth_token(Context, Method, JObj)
+    end.
 
-            AccountId = wh_json:get_value(<<"account_id">>, JObj),
-            OwnerId = wh_json:get_value(<<"owner_id">>, JObj),
+create_auth_token(Context, Method, JObj) ->
+    Data = cb_context:req_data(Context),
 
-            Token = props:filter_undefined(
-                      [{<<"account_id">>, AccountId}
-                       ,{<<"owner_id">>, OwnerId}
-                       ,{<<"as">>, wh_json:get_value(<<"as">>, Data)}
-                       ,{<<"api_key">>, wh_json:get_value(<<"api_key">>, Data)}
-                       ,{<<"restrictions">>, wh_json:get_value(<<"restrictions">>, Data)}
-                       ,{<<"method">>, wh_util:to_binary(Method)}
-                      ]),
-            JObjToken = wh_doc:update_pvt_parameters(wh_json:from_list(Token)
-                                                     ,wh_util:format_account_id(AccountId, 'encoded')
-                                                     ,Token
-                                                    ),
+    AccountId = wh_json:get_value(<<"account_id">>, JObj),
+    OwnerId = wh_json:get_value(<<"owner_id">>, JObj),
 
-            case couch_mgr:save_doc(?KZ_TOKEN_DB, JObjToken) of
-                {'ok', Doc} ->
-                    AuthToken = wh_json:get_value(<<"_id">>, Doc),
-                    lager:debug("created new local auth token ~s", [AuthToken]),
-                    ?MODULE:response(?MODULE:response_auth(JObj, AccountId, OwnerId)
-                                     ,cb_context:setters(
-                                        Context
-                                        ,[{fun cb_context:set_auth_token/2, AuthToken}
-                                          ,{fun cb_context:set_auth_doc/2, Doc}
-                                         ])
-                                    );
-                {'error', R} ->
-                    lager:debug("could not create new local auth token, ~p", [R]),
-                    cb_context:add_system_error('invalid_credentials', Context)
-            end
+    Token = props:filter_undefined(
+              [{<<"account_id">>, AccountId}
+               ,{<<"owner_id">>, OwnerId}
+               ,{<<"as">>, wh_json:get_value(<<"as">>, Data)}
+               ,{<<"api_key">>, wh_json:get_value(<<"api_key">>, Data)}
+               ,{<<"restrictions">>, wh_json:get_value(<<"restrictions">>, Data)}
+               ,{<<"method">>, wh_util:to_binary(Method)}
+              ]),
+    JObjToken = wh_doc:update_pvt_parameters(wh_json:from_list(Token)
+                                             ,wh_util:format_account_id(AccountId, 'encoded')
+                                             ,Token
+                                            ),
+
+    case couch_mgr:save_doc(?KZ_TOKEN_DB, JObjToken) of
+        {'ok', Doc} ->
+            AuthToken = wh_json:get_value(<<"_id">>, Doc),
+            lager:debug("created new local auth token ~s", [AuthToken]),
+            ?MODULE:response(?MODULE:response_auth(JObj, AccountId, OwnerId)
+                             ,cb_context:setters(
+                                Context
+                                ,[{fun cb_context:set_auth_token/2, AuthToken}
+                                  ,{fun cb_context:set_auth_doc/2, Doc}
+                                 ])
+                            );
+        {'error', R} ->
+            lager:debug("could not create new local auth token, ~p", [R]),
+            cb_context:add_system_error('invalid_credentials', Context)
     end.
 
 -spec generate_year_month_sequence(year_month_tuple(), year_month_tuple(), wh_proplist()) ->
@@ -942,7 +928,7 @@ generate_year_month_sequence({FromYear, FromMonth}, {ToYear, ToMonth}, Range) ->
 -spec descendants_count() -> 'ok'.
 -spec descendants_count(wh_proplist() | ne_binary()) -> 'ok'.
 descendants_count() ->
-    Limit = whapps_config:get_integer(<<"whistle_couch">>, <<"default_chunk_size">>, 1000),
+    Limit = whapps_config:get_integer(?SYSCONFIG_COUCH, <<"default_chunk_size">>, 1000),
     ViewOptions = [{'limit', Limit}
                    ,{'skip', 0}
                   ],
@@ -1008,6 +994,80 @@ format_emergency_caller_id_number(Context) ->
                         ,wh_json:set_value(<<"caller_id">>, NCallerId, cb_context:req_data(Context))
                     )
             end
+    end.
+
+%% @public
+-spec maybe_refresh_fs_xml('user' | 'device', cb_context:context()) -> 'ok'.
+maybe_refresh_fs_xml(Kind, Context) ->
+    DbDoc = cb_context:fetch(Context, 'db_doc'),
+    Doc = cb_context:doc(Context),
+    Precondition =
+        (wh_json:get_value(<<"presence_id">>, DbDoc) =/=
+             wh_json:get_value(<<"presence_id">>, Doc)
+        )
+        or (wh_json:get_value([<<"media">>, <<"encryption">>, <<"enforce_security">>], DbDoc) =/=
+                wh_json:get_value([<<"media">>, <<"encryption">>, <<"enforce_security">>], Doc)
+           ),
+    maybe_refresh_fs_xml(Kind, Context, Precondition).
+
+-spec maybe_refresh_fs_xml('user' | 'device', cb_context:context(), boolean()) -> 'ok'.
+maybe_refresh_fs_xml('user', _Context, 'false') -> 'ok';
+maybe_refresh_fs_xml('user', Context, 'true') ->
+    Doc = cb_context:doc(Context),
+    AccountDb = cb_context:account_db(Context),
+    Realm     = wh_util:get_account_realm(AccountDb),
+    Id = wh_json:get_value(<<"_id">>, Doc),
+    Devices = get_devices_by_owner(AccountDb, Id),
+    lists:foreach(fun (DevDoc) -> refresh_fs_xml(Realm, DevDoc) end, Devices);
+maybe_refresh_fs_xml('device', Context, Precondition) ->
+    Doc   = cb_context:doc(Context),
+    DbDoc = cb_context:fetch(Context, 'db_doc'),
+    ( Precondition
+      or (kz_device:sip_username(DbDoc) =/= kz_device:sip_username(Doc))
+      or (kz_device:sip_password(DbDoc) =/= kz_device:sip_password(Doc))
+      or (wh_json:get_value(<<"owner_id">>, DbDoc) =/=
+              wh_json:get_value(<<"owner_id">>, Doc))
+      or (wh_json:is_true(<<"enabled">>, DbDoc) andalso
+          not wh_json:is_true(<<"enabled">>, Doc)
+         )
+    ) andalso
+        refresh_fs_xml(
+          wh_util:get_account_realm(cb_context:account_db(Context))
+          ,DbDoc
+         ),
+    'ok'.
+
+-spec refresh_fs_xml(cb_context:context()) -> 'ok'.
+refresh_fs_xml(Context) ->
+    Realm = wh_util:get_account_realm(cb_context:account_db(Context)),
+    DbDoc = cb_context:fetch(Context, 'db_doc'),
+    refresh_fs_xml(Realm, DbDoc).
+
+-spec refresh_fs_xml(ne_binary(), wh_json:object()) -> 'ok'.
+refresh_fs_xml(Realm, Doc) ->
+    case kz_device:sip_username(Doc) of
+        'undefined' -> 'ok';
+        Username ->
+            lager:debug("flushing fs xml for user '~s' at '~s'", [Username,Realm]),
+            Req = [{<<"Username">>, Username}
+                   ,{<<"Realm">>, Realm}
+                   | wh_api:default_headers(?APP_NAME, ?APP_VERSION)
+                  ],
+            wh_amqp_worker:cast(Req, fun wapi_switch:publish_fs_xml_flush/1)
+    end.
+
+%% @public
+-spec get_devices_by_owner(ne_binary(), api_binary()) -> ne_binaries().
+get_devices_by_owner(_AccountDb, 'undefined') -> [];
+get_devices_by_owner(AccountDb, OwnerId) ->
+    ViewOptions = [{'key', [OwnerId, <<"device">>]},
+                   'include_docs'
+                  ],
+    case couch_mgr:get_results(AccountDb, <<"cf_attributes/owned">>, ViewOptions) of
+        {'ok', JObjs} -> [wh_json:get_value(<<"doc">>, JObj) || JObj <- JObjs];
+        {'error', _R} ->
+            lager:warning("unable to find documents owned by ~s: ~p", [OwnerId, _R]),
+            []
     end.
 
 %%--------------------------------------------------------------------

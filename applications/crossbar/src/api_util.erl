@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%%% @copyright (C) 2012-2013, 2600Hz
+%%% @copyright (C) 2012-2015, 2600Hz
 %%% @doc
 %%% Moved util functions out of v1_resource so only REST-related calls
 %%% are in there.
@@ -14,7 +14,7 @@
 -export([is_cors_preflight/1
          ,is_cors_request/1
          ,add_cors_headers/2
-         ,allow_methods/4
+         ,allow_methods/3
          ,parse_path_tokens/2
          ,get_req_data/2
          ,get_http_verb/2
@@ -39,13 +39,6 @@
 -include("crossbar.hrl").
 
 -define(MAX_UPLOAD_SIZE, whapps_config:get_integer(?CONFIG_CAT, <<"max_upload_size">>, 8000000)).
-
--type cowboy_multipart_response() :: {{'headers', cowboy:http_headers()} |
-                                      {'data', binary()} |
-                                      'end_of_part' |
-                                      'eof'
-                                      ,cowboy_req:req()
-                                     }.
 
 -type halt_return() :: {'halt', cowboy_req:req(), cb_context:context()}.
 
@@ -268,33 +261,61 @@ try_json(ReqBody, QS, Context, Req) ->
 
 -spec get_url_encoded_body(ne_binary()) -> wh_json:object().
 get_url_encoded_body(ReqBody) ->
-    wh_json:from_list(cowboy_http:x_www_form_urlencoded(ReqBody)).
+    wh_json:from_list(cow_qs:parse_qs(ReqBody)).
 
--spec extract_multipart(cb_context:context(), cowboy_req:req()) ->
-                               {cb_context:context(), cowboy_req:req()}.
-extract_multipart(Context, Req0) ->
-    MPData = cowboy_req:multipart_data(Req0),
+-type cowboy_multipart_response() :: {'ok', cow_multipart:headers(), cowboy_req:req()} | {'done', cowboy_req:req()} | cowboy_req:req().
 
-    case extract_multipart_content(MPData, wh_json:new()) of
-        {'eof', Req1} -> {Context, Req1};
-        {'end_of_part', JObj, Req1} ->
-            extract_multipart(cb_context:set_req_files(Context, [JObj|cb_context:req_files(Context)]), Req1)
-    end.
+-type cowboy_multipart_body() :: {'ok', binary(), cowboy_req:req()} | {'more', binary(), cowboy_req:req()} | cowboy_req:req().
 
--spec extract_multipart_content(cowboy_multipart_response(), wh_json:object()) ->
-                                       {'end_of_part', wh_json:object(), cowboy_req:req()} |
-                                       {'eof', cowboy_req:req()}.
-extract_multipart_content({'eof', _Req}=EOF, _JObj) -> EOF;
-extract_multipart_content({'end_of_part', Req}, JObj) -> {'end_of_part', JObj, Req};
-extract_multipart_content({'headers', Headers, Req}, JObj) ->
-    lager:debug("setting multipart headers: ~p", [Headers]),
-    MPData = cowboy_req:multipart_data(Req),
-    extract_multipart_content(MPData, wh_json:set_value(<<"headers">>, Headers, JObj));
-extract_multipart_content({'body', Datum, Req}, JObj) ->
+-spec extract_multipart(cb_context:context(), cowboy_multipart_response()) ->
+                               {cb_context:context(), cowboy_req:req()} |
+                               halt_return().
+extract_multipart(Context, {'done', Req}) ->
+    {Context, Req};
+extract_multipart(Context, {'ok', Headers, Req}) ->
+    JObj = wh_json:from_list([{<<"headers">>, Headers}
+                              ,{<<"data">>, <<>>}
+                             ]),
+    {R, J} = extract_multipart_body(Context, Req, JObj),
+    Files = [J|cb_context:req_files(Context)],
+    extract_multipart(
+      cb_context:set_req_files(Context, Files)
+      ,cowboy_req:part(R)
+     );
+extract_multipart(Context, Req) ->
+    extract_multipart(
+      Context
+      ,cowboy_req:part(Req)
+     ).
+
+-spec extract_multipart_body(cb_context:context(), cowboy_multipart_body(), wh_json:object()) ->
+                                    {cb_context:context(), cowboy_req:req()} |
+                                    halt_return().
+extract_multipart_body(_Context, {'ok', Datum, Req}, JObj) ->
     Data = wh_json:get_value(<<"data">>, JObj, <<>>),
-    extract_multipart_content(cowboy_req:multipart_data(Req)
-                              ,wh_json:set_value(<<"data">>, <<Data/binary, Datum/binary>>, JObj)
-                             ).
+    {Req, wh_json:set_value(<<"data">>, <<Data/binary, Datum/binary>>, JObj)};
+extract_multipart_body(Context, {'more', Datum, Req}, JObj) ->
+    Data = <<(wh_json:get_value(<<"data">>, JObj, <<>>))/binary
+             ,Datum/binary
+           >>,
+    case erlang:byte_size(Data) > ?MAX_UPLOAD_SIZE of
+        'true' ->
+            lager:error("file size exceeded, max is ~p", [?MAX_UPLOAD_SIZE]),
+            ?MODULE:halt(Req
+                         ,cb_context:add_validation_error(<<"file">>, <<"maxLength">>
+                                                          ,?MAX_UPLOAD_SIZE
+                                                          ,Context
+                                                         )
+                        );
+        'false' ->
+            extract_multipart_body(
+              Context
+              ,cowboy_req:part_body(Req)
+              ,wh_json:set_value(<<"data">>, Data, JObj)
+             )
+    end;
+extract_multipart_body(Context, Req, JObj) ->
+    extract_multipart_body(Context, cowboy_req:part_body(Req), JObj).
 
 -spec extract_file(cb_context:context(), ne_binary(), cowboy_req:req()) ->
                           {cb_context:context(), cowboy_req:req()} |
@@ -310,7 +331,8 @@ extract_file(Context, ContentType, Req0) ->
                          ,cb_context:add_validation_error(<<"file">>, <<"maxLength">>
                                                           ,?MAX_UPLOAD_SIZE
                                                           ,Context
-                                                          ));
+                                                         )
+                        );
         {'ok', FileContents, Req1} ->
             %% http://tools.ietf.org/html/rfc2045#page-17
             case cowboy_req:header(<<"content-transfer-encoding">>, Req1) of
@@ -558,22 +580,27 @@ is_cb_module_version(#cb_context{api_version=ApiVersion}, Elem) ->
 %% 'POST' from the allowed methods.
 %% @end
 %%--------------------------------------------------------------------
--spec allow_methods([http_methods(),...], http_methods(), ne_binary(), http_method()) -> http_methods().
-allow_methods(Responses, Available, ReqVerb, HttpVerb) ->
+-spec allow_methods([http_methods(),...], ne_binary(), http_method()) -> http_methods().
+allow_methods(Responses, ReqVerb, HttpVerb) ->
     case crossbar_bindings:succeeded(Responses) of
         [] -> [];
         Succeeded ->
-            AllowedSet = lists:foldr(fun(Response, Acc) ->
-                                             sets:union(Acc, sets:from_list(uppercase_all(Response)))
-                                     end, sets:from_list(Available), Succeeded),
+            AllowedSet = lists:foldr(fun allow_methods_fold/2, sets:new(), Succeeded),
             maybe_add_post_method(ReqVerb, HttpVerb, sets:to_list(AllowedSet))
     end.
 
+-spec allow_methods_fold(http_methods(), set()) -> set().
+allow_methods_fold(Response, Acc) ->
+    sets:union(Acc, sets:from_list(uppercase_all(Response))).
+
+-spec uppercase_all(ne_binaries() | atoms()) -> ne_binaries().
 uppercase_all(L) when is_list(L) ->
     [wh_util:to_upper_binary(wh_util:to_binary(I)) || I <- L].
 
 %% insert 'POST' if Verb is in Allowed; otherwise remove 'POST'.
 -spec maybe_add_post_method(ne_binary(), http_method(), http_methods()) -> http_methods().
+maybe_add_post_method(?HTTP_POST, ?HTTP_POST, Allowed) ->
+    Allowed;
 maybe_add_post_method(Verb, ?HTTP_POST, Allowed) ->
     BigVerb = wh_util:to_upper_binary(Verb),
     case lists:member(BigVerb, Allowed) of
@@ -753,7 +780,6 @@ content_type_matches(CTA, {CT, SubCT, _}) when is_binary(CTA) ->
 content_type_matches(CTA, CT) when is_binary(CTA), is_binary(CT) ->
     CTA =:= CT;
 content_type_matches(_CTA, _CTAs) ->
-    lager:debug("ct: ~p, cts: ~p", [_CTA, _CTAs]),
     'false'.
 
 -spec ensure_content_type(content_type() | 'undefined') -> content_type().

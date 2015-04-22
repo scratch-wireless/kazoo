@@ -256,7 +256,11 @@ handle_cast('maybe_start_recording_on_answer', #state{is_recording='false'
 handle_cast('stop_call', #state{store_attempted='true'}=State) ->
     lager:debug("we've already sent a store attempt, waiting to hear back"),
     {'noreply', State};
-handle_cast('stop_call', #state{media_name=MediaName
+handle_cast('stop_call', #state{is_recording='false'}=State) ->
+    lager:debug("recv stop_call event, but recording is not started, ignoring event"),
+    {'noreply', State};
+handle_cast('stop_call', #state{is_recording='true'
+                                ,media_name=MediaName
                                 ,format=Format
                                 ,call=Call
                                 ,should_store=Store
@@ -483,24 +487,34 @@ store_url(Call, JObj) ->
     {'ok', URL} = wh_media_url:store(AccountDb, MediaId, MediaName),
     URL.
 
--type store_url() :: 'false' | {'true', 'local'} | {'true', 'other', ne_binary()}.
+-type store_url() :: 'false' |
+                     {'true', 'local'} |
+                     {'true', 'other', 'third_party'} |
+                     {'true', 'other', ne_binary()}.
 
+-spec should_store_recording() -> store_url().
 -spec should_store_recording(api_binary()) -> store_url().
 should_store_recording(Url) ->
     case wh_util:is_empty(Url) of
-        'true' ->
-            case whapps_config:get_is_true(?CONFIG_CAT, <<"store_recordings">>, 'false') of
-                'true' -> {'true', 'local'};
-                'false' -> 'false'
-            end;
+        'true' -> should_store_recording();
         'false' -> {'true', 'other', Url}
     end.
 
+should_store_recording() ->
+    BCHost = whapps_config:get_ne_binary(?CONFIG_CAT, <<"third_party_bigcouch_host">>),
+    case whapps_config:get_is_true(?CONFIG_CAT, <<"store_recordings">>, 'false') of
+        'true' when BCHost =/= 'undefined' -> {'true', 'other', 'third_party'};
+        'true' -> {'true', 'local'};
+        'false' -> 'false'
+    end.
+
 -spec save_recording(whapps_call:call(), ne_binary(), ne_binary(), store_url()) -> 'ok'.
-save_recording(Call, MediaName, Format, 'false') ->
-    lager:debug("not configured to store recording ~s", [MediaName]),
+save_recording(_Call, MediaName, _Format, 'false') ->
+    lager:info("not configured to store recording ~s", [MediaName]);
+save_recording(Call, MediaName, Format, {'true', 'other', 'third_party'}) ->
     case whapps_config:get_ne_binary(?CONFIG_CAT, <<"third_party_bigcouch_host">>) of
-        'undefined' -> lager:debug("no URL for call recording provided, third_party_bigcouch_host undefined");
+        'undefined' ->
+            lager:error("no URL for call recording provided, third_party_bigcouch_host undefined");
         BCHost -> store_recording_to_third_party_bigcouch(Call, MediaName, Format, BCHost)
     end;
 save_recording(Call, MediaName, Format, {'true', 'local'}) ->
@@ -508,10 +522,10 @@ save_recording(Call, MediaName, Format, {'true', 'local'}) ->
     lager:info("stored meta: ~p", [MediaJObj]),
     StoreUrl = store_url(Call, MediaJObj),
     lager:info("store local url: ~s", [StoreUrl]),
-    store_recording(MediaName, StoreUrl, Call);
+    store_recording(MediaName, StoreUrl, Call, 'local');
 save_recording(Call, MediaName, _Format, {'true', 'other', Url}) ->
     lager:info("store remote url: ~s", [Url]),
-    store_recording(MediaName, Url, Call).
+    store_recording(MediaName, Url, Call, 'other').
 
 -spec store_recording_to_third_party_bigcouch(whapps_call:call(), ne_binary(), ne_binary(), ne_binary()) -> 'ok'.
 store_recording_to_third_party_bigcouch(Call, MediaName, Format, BCHost) ->
@@ -547,10 +561,13 @@ store_recording_to_third_party_bigcouch(Call, MediaName, Format, BCHost) ->
     lager:info("store to third-party modb url: ~s", [StoreUrl]),
     'ok' = whapps_call_command:store(MediaName, StoreUrl, Call).
 
--spec store_recording(ne_binary(), ne_binary(), whapps_call:call()) -> 'ok'.
-store_recording(MediaName, Url, Call) ->
+-spec store_recording(ne_binary(), ne_binary(), whapps_call:call(), 'local' | 'other') -> 'ok'.
+store_recording(MediaName, Url, Call, 'other') ->
     StoreUrl = append_path(Url, MediaName),
     lager:debug("appending filename to url: ~s", [StoreUrl]),
+    'ok' = whapps_call_command:store(MediaName, StoreUrl, Call);
+
+store_recording(MediaName, StoreUrl, Call, 'local') ->
     'ok' = whapps_call_command:store(MediaName, StoreUrl, Call).
 
 -spec append_path(ne_binary(), ne_binary()) -> ne_binary().

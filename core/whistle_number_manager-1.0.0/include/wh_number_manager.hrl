@@ -99,6 +99,7 @@
                         api_binary().
 
 -type operation_return() :: {'ok', wh_json:object()} |
+                            {'dry_run', wh_proplist()} |
                             {wnm_failures(), api_object()}.
 
 %%% NUMBER STATES
@@ -115,6 +116,10 @@
 %%% cancelled    - Number has been cancelled with the carrier and will be removed from the system
 %%% deleted      - Number has been permanently deleted (and will be removed from
 %%%                the system after the number has been aged properly
+
+-define(DASH_KEY, <<"dash_e911">>).
+-define(VITELITY_KEY, <<"vitelity_e911">>).
+-define(EMERGENCY_SERVICES_KEY, <<"e911">>).
 
 -define(WH_NUMBER_MANAGER_HRL, 'true').
 -endif.

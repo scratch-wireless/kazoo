@@ -35,6 +35,7 @@
 -export([init_apps/2, init_app/2]).
 
 -include_lib("crossbar.hrl").
+-include_lib("whistle/include/wh_system_config.hrl").
 
 -type input_term() :: atom() | string() | ne_binary().
 
@@ -150,7 +151,8 @@ persist_module(Module, Mods) ->
     crossbar_config:set_default_autoload_modules(
       [wh_util:to_binary(Module)
        | lists:delete(wh_util:to_binary(Module), Mods)
-      ]).
+      ]),
+    'ok'.
 
 %%--------------------------------------------------------------------
 %% @public
@@ -391,14 +393,15 @@ create_account(AccountName, Realm, Username, Password) ->
         {'ok', C3} = validate_user(User, C2),
         {'ok', _} = create_user(C3),
 
-        AccountDb = cb_context:account_db(C1),
-        AccountId = cb_context:account_id(C1),
+        AccountDb = cb_context:account_db(C3),
+        AccountId = cb_context:account_id(C3),
 
         case whapps_util:get_all_accounts() of
             [AccountDb] ->
                 _ = promote_account(AccountId),
                 _ = allow_account_number_additions(AccountId),
                 _ = whistle_services_maintenance:make_reseller(AccountId),
+                _ = update_system_config(AccountId),
                 'ok';
             _Else -> 'ok'
         end,
@@ -410,6 +413,11 @@ create_account(AccountName, Realm, Username, Password) ->
             wh_util:log_stacktrace(ST),
             'failed'
     end.
+
+-spec update_system_config(ne_binary()) -> 'ok'.
+update_system_config(AccountId) ->
+    whapps_config:set(?WH_SYSTEM_CONFIG_ACCOUNT, <<"master_account_id">>, AccountId),
+    io:format("updating master account id in system_config.~s~n", [?WH_SYSTEM_CONFIG_ACCOUNT]).
 
 %%--------------------------------------------------------------------
 %% @private
@@ -553,10 +561,10 @@ print_account_info(AccountDb, AccountId) ->
     case couch_mgr:open_doc(AccountDb, AccountId) of
         {'ok', JObj} ->
             io:format("Account ID: ~s (~s)~n", [AccountId, AccountDb]),
-            io:format("  Name: ~s~n", [wh_json:get_value(<<"name">>, JObj)]),
-            io:format("  Realm: ~s~n", [wh_json:get_value(<<"realm">>, JObj)]),
-            io:format("  Enabled: ~s~n", [not wh_json:is_false(<<"pvt_enabled">>, JObj)]),
-            io:format("  System Admin: ~s~n", [wh_json:is_true(<<"pvt_superduper_admin">>, JObj)]);
+            io:format("  Name: ~s~n", [kz_account:name(JObj)]),
+            io:format("  Realm: ~s~n", [kz_account:realm(JObj)]),
+            io:format("  Enabled: ~s~n", [kz_account:is_enabled(JObj)]),
+            io:format("  System Admin: ~s~n", [kz_account:is_superduper_admin(JObj)]);
         {'error', _} ->
             io:format("Account ID: ~s (~s)~n", [AccountId, AccountDb])
     end,
@@ -794,10 +802,10 @@ save_old_ring_group(JObj, NewCallflow) ->
 -spec init_apps(ne_binary(), ne_binary()) -> 'ok'.
 init_apps(AppsPath, AppUrl) ->
     Apps = find_apps(AppsPath),
-    InitApp = fun (App) -> init_app(App, AppUrl) end,
+    InitApp = fun(App) -> init_app(App, AppUrl) end,
     lists:foreach(InitApp, Apps).
 
--spec find_apps(ne_binary()) -> {'ok', ne_binaries()}.
+-spec find_apps(ne_binary()) -> ne_binaries().
 find_apps(AppsPath) ->
     AccFun =
         fun (AppJSONPath, Acc) ->
@@ -841,7 +849,7 @@ maybe_create_app(AppPath, MetaData, MasterAccountDb) ->
 -spec find_app(ne_binary(), ne_binary()) -> {'ok', wh_json:object()} |
                                             {'error', _}.
 find_app(Db, Name) ->
-    case couch_mgr:get_results(Db, <<"apps_store/crossbar_listing">>, [{'key', Name}]) of
+    case couch_mgr:get_results(Db, ?CB_APPS_STORE_LIST, [{'key', Name}]) of
         {'ok', []} -> {'error', 'not_found'};
         {'ok', [View]} -> {'ok', View};
         {'error', _}=E -> E
@@ -859,7 +867,7 @@ create_app(AppPath, MetaData, MasterAccountDb) ->
                                                    ]),
             maybe_add_icons(AppPath, wh_doc:id(JObj), MasterAccountDb);
         {'error', _E} ->
-            io:format(" failed to save app ~s: ~p", [wh_json:get_value(<<"name">>, MetaData), _E])
+            io:format(" failed to save app ~s to ~s: ~p~n", [wh_json:get_value(<<"name">>, MetaData), MasterAccountDb, _E])
     end.
 
 -spec maybe_add_icons(ne_binary(), ne_binary(), ne_binary()) -> 'ok'.

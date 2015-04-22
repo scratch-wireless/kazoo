@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%%% @copyright (C) 2011-2014, 2600Hz INC
+%%% @copyright (C) 2011-2015, 2600Hz INC
 %%% @doc
 %%% Users module
 %%%
@@ -32,6 +32,7 @@
 -define(SERVER, ?MODULE).
 -define(CB_LIST, <<"users/crossbar_listing">>).
 -define(LIST_BY_USERNAME, <<"users/list_by_username">>).
+-define(LIST_BY_PRESENCE_ID, <<"devices/listing_by_presence_id">>).
 -define(QUICKCALL, <<"quickcall">>).
 
 %%%===================================================================
@@ -232,7 +233,14 @@ validate(Context, UserId, ?QUICKCALL, _) ->
 
 -spec post(cb_context:context(), path_token()) -> cb_context:context().
 post(Context, _) ->
-    crossbar_doc:save(Context).
+    _ = crossbar_util:maybe_refresh_fs_xml('user', Context),
+    Context1 = crossbar_doc:save(Context),
+    case cb_context:resp_status(Context1) of
+        'success' ->
+            maybe_update_devices_presence(Context1),
+            Context1;
+        _ -> Context1
+    end.
 
 -spec put(cb_context:context()) -> cb_context:context().
 put(Context) ->
@@ -255,6 +263,58 @@ delete(Context, _Id) ->
 -spec patch(cb_context:context(), path_token()) -> cb_context:context().
 patch(Context, _Id) ->
     crossbar_doc:save(Context).
+
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% @end
+%%--------------------------------------------------------------------
+-spec maybe_update_devices_presence(cb_context:context()) -> 'ok'.
+maybe_update_devices_presence(Context) ->
+    DbDoc = cb_context:fetch(Context, 'db_doc'),
+    Doc = cb_context:doc(Context),
+    case wh_json:get_value(<<"presence_id">>, DbDoc) =:= wh_json:get_value(<<"presence_id">>, Doc) of
+        'true' ->
+            lager:debug("presence_id did not change, ignoring");
+        'false' ->
+            update_devices_presence(Context)
+    end.
+
+-spec update_devices_presence(cb_context:context()) -> 'ok'.
+-spec update_devices_presence(cb_context:context(), wh_json:objects()) -> 'ok'.
+update_devices_presence(Context) ->
+    Doc = cb_context:doc(Context),
+    UserId = wh_json:get_value(<<"id">>, Doc),
+    AccountDb = wh_json:get_value(<<"pvt_account_db">>, Doc),
+    Options = [{'key', UserId}, 'include_docs'],
+    case couch_mgr:get_results(AccountDb, ?LIST_BY_PRESENCE_ID, Options) of
+        {'error', _R} ->
+            lager:error("failed to query view ~s in ~s : ~p", [?LIST_BY_PRESENCE_ID, AccountDb, _R]);
+        {'ok', []} ->
+            lager:debug("no device found attached to ~s", [UserId]);
+        {'ok', JObjs} ->
+            update_devices_presence(Context, JObjs)
+    end.
+
+update_devices_presence(Context, JObjs) ->
+    lists:foreach(
+      fun(JObj) -> update_device_presence(Context, JObj) end
+      ,JObjs
+     ).
+
+-spec update_device_presence(cb_context:context(), wh_json:object()) -> pid().
+update_device_presence(Context, JObj) ->
+    AuthToken = cb_context:auth_token(Context),
+    ReqId = cb_context:req_id(Context),
+
+    DeviceDoc = wh_json:get_value(<<"doc">>, JObj),
+
+    lager:debug("re-provisioning device ~s", [wh_json:get_value(<<"id">>, JObj)]),
+
+    spawn(fun() ->
+                  wh_util:put_callid(ReqId),
+                  provisioner_v5:update_device(DeviceDoc, AuthToken)
+          end).
 
 %%--------------------------------------------------------------------
 %% @private
@@ -340,17 +400,7 @@ validate_request(UserId, Context) ->
 
 -spec validate_patch(api_binary(), cb_context:context()) -> cb_context:context().
 validate_patch(UserId, Context) ->
-    Context1 = load_user(UserId, Context),
-    case cb_context:resp_status(Context1) of
-        'success' ->
-            PatchJObj = wh_doc:public_fields(cb_context:req_data(Context)),
-            UserJObj = wh_json:merge_jobjs(PatchJObj, cb_context:doc(Context1)),
-
-            lager:debug("patched doc, now validating"),
-            prepare_username(UserId, cb_context:set_req_data(Context, UserJObj));
-        _Status ->
-            Context1
-    end.
+    crossbar_doc:patch_and_validate(UserId, Context, fun validate_request/2).
 
 -spec prepare_username(api_binary(), cb_context:context()) -> cb_context:context().
 prepare_username(UserId, Context) ->

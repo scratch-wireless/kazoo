@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%%% @copyright (C) 2010-2014, 2600Hz INC
+%%% @copyright (C) 2010-2015, 2600Hz INC
 %%% @doc
 %%% Various utilities - a veritable cornicopia
 %%% @end
@@ -34,6 +34,7 @@
          ,from_hex_binary/1, from_hex_string/1
          ,to_list/1, to_binary/1
          ,to_atom/1, to_atom/2
+         ,error_to_binary/1
         ]).
 -export([to_boolean/1, is_boolean/1
          ,is_true/1, is_false/1
@@ -49,7 +50,6 @@
          ,strip_left_binary/2, strip_right_binary/2
          ,suffix_binary/2
         ]).
-
 
 -export([clean_binary/1, clean_binary/2
          ,remove_white_spaces/1
@@ -73,6 +73,8 @@
 -export([current_tstamp/0, current_unix_tstamp/0
          ,gregorian_seconds_to_unix_seconds/1, unix_seconds_to_gregorian_seconds/1
          ,pretty_print_datetime/1
+         ,rfc1036/1, rfc1036/2
+         ,iso8601/1
          ,pretty_print_elapsed_s/1
          ,decr_timeout/2
         ]).
@@ -127,17 +129,17 @@ log_stacktrace() ->
     ST = erlang:get_stacktrace(),
     log_stacktrace(ST).
 log_stacktrace(ST) ->
-    lager:debug("stacktrace:"),
+    lager:info("stacktrace:"),
     _ = [log_stacktrace_mfa(M, F, A, Info)
          || {M, F, A, Info} <- ST
         ],
     'ok'.
 
 log_stacktrace_mfa(M, F, Arity, Info) when is_integer(Arity) ->
-    lager:debug("st: ~s:~s/~b at (~b)", [M, F, Arity, props:get_value('line', Info, 0)]);
+    lager:info("st: ~s:~s/~b at (~b)", [M, F, Arity, props:get_value('line', Info, 0)]);
 log_stacktrace_mfa(M, F, Args, Info) ->
-    lager:debug("st: ~s:~s at ~p", [M, F, props:get_value('line', Info, 0)]),
-    [lager:debug("args: ~p", [Arg]) || Arg <- Args],
+    lager:info("st: ~s:~s at ~p", [M, F, props:get_value('line', Info, 0)]),
+    [lager:info("args: ~p", [Arg]) || Arg <- Args],
     'ok'.
 
 -define(LOG_LEVELS, ['emergency'
@@ -316,7 +318,7 @@ is_in_account_hierarchy(CheckFor, InAccount, IncludeSelf) ->
             lager:debug("account ~s is the same as the account to fetch the hierarchy from", [CheckId]),
             'true';
         {'ok', JObj} ->
-            Tree = wh_json:get_value(<<"pvt_tree">>, JObj, []),
+            Tree = kz_account:tree(JObj),
             case lists:member(CheckId, Tree) of
                 'true' ->
                     lager:debug("account ~s is in the account hierarchy of ~s", [CheckId, AccountId]),
@@ -342,7 +344,7 @@ is_system_admin(Account) ->
     AccountId = wh_util:format_account_id(Account, 'raw'),
     AccountDb = wh_util:format_account_id(Account, 'encoded'),
     case couch_mgr:open_cache_doc(AccountDb, AccountId) of
-        {'ok', JObj} -> wh_json:is_true(<<"pvt_superduper_admin">>, JObj);
+        {'ok', JObj} -> kz_account:is_superduper_admin(JObj);
         {'error', _R} ->
             lager:debug("unable to open account definition for ~s: ~p", [Account, _R]),
             'false'
@@ -371,7 +373,7 @@ is_account_enabled(Account) ->
             lager:error("could not open account ~p in ~p", [AccountId, AccountDb]),
             'false';
         {'ok', JObj} ->
-            wh_json:is_true(<<"pvt_enabled">>, JObj, 'true')
+            kz_account:is_enabled(JObj)
                 andalso wh_json:is_true(<<"enabled">>, JObj, 'true')
 
     end.
@@ -408,7 +410,7 @@ get_account_realm(AccountId) ->
 get_account_realm('undefined', _) -> 'undefined';
 get_account_realm(Db, AccountId) ->
     case couch_mgr:open_cache_doc(Db, AccountId) of
-        {'ok', JObj} -> wh_json:get_ne_value(<<"realm">>, JObj);
+        {'ok', JObj} -> kz_account:realm(JObj);
         {'error', _R} ->
             lager:debug("error while looking up account realm in ~s: ~p", [AccountId, _R]),
             'undefined'
@@ -446,6 +448,11 @@ try_load_module(Name) ->
 pad_binary(Bin, Size, Value) when size(Bin) < Size ->
     pad_binary(<<Bin/binary, Value/binary>>, Size, Value);
 pad_binary(Bin, _, _) -> Bin.
+
+-spec pad_binary_left(binary(), non_neg_integer(), binary()) -> binary().
+pad_binary_left(Bin, Size, Value) when size(Bin) < Size ->
+    pad_binary_left(<<Value/binary, Bin/binary>>, Size, Value);
+pad_binary_left(Bin, _Size, _Value) -> Bin.
 
 %%--------------------------------------------------------------------
 %% @public
@@ -748,7 +755,7 @@ to_list(X) when is_list(X) -> X.
 
 %% Known limitations:
 %%   Converting [256 | _], lists with integers > 255
--spec to_binary(atom() | string() | binary() | integer() | float()) -> binary().
+-spec to_binary(atom() | string() | binary() | integer() | float() | pid()) -> binary().
 to_binary(X) when is_float(X) -> to_binary(mochinum:digits(X));
 to_binary(X) when is_integer(X) -> list_to_binary(integer_to_list(X));
 to_binary(X) when is_atom(X) -> list_to_binary(atom_to_list(X));
@@ -784,6 +791,16 @@ to_boolean('true') -> 'true';
 to_boolean(<<"false">>) -> 'false';
 to_boolean("false") -> 'false';
 to_boolean('false') -> 'false'.
+
+-spec error_to_binary({'error', binary()} | binary()) -> binary().
+error_to_binary({'error', Reason}) ->
+    error_to_binary(Reason);
+error_to_binary(Reason) ->
+    try to_binary(Reason) of
+        Message -> Message
+    catch
+        _:_ -> <<"Unknown Error">>
+    end.
 
 -spec is_true(binary() | string() | atom()) -> boolean().
 is_true(<<"true">>) -> 'true';
@@ -942,7 +959,7 @@ remove_white_spaces(Bin, Opts) ->
 
 -spec remove_white_spaces(binary()) -> binary().
 remove_white_spaces(Bin) ->
-    << <<X>> || <<X>> <= Bin, X =/= $ >>. %"$ " is 32
+    << <<X>> || <<X>> <= Bin, X =/= $\s >>.
 
 -spec binary_md5(text()) -> ne_binary().
 binary_md5(Text) -> to_hex_binary(erlang:md5(to_binary(Text))).
@@ -983,23 +1000,13 @@ current_unix_tstamp() ->
 %% fetch and cache the whistle version from the VERSION file in whistle's root folder
 -spec whistle_version() -> ne_binary().
 whistle_version() ->
-    case wh_cache:fetch(?WHISTLE_VERSION_CACHE_KEY) of
-        {'ok', Version} ->  Version;
-        {'error', _} ->
-            VersionFile = filename:join([code:lib_dir('whistle'), "..", "..", "VERSION"]),
-            whistle_version(VersionFile)
-    end.
-
--spec whistle_version(ne_binary() | nonempty_string()) -> ne_binary().
-whistle_version(FileName) ->
-    case file:read_file(FileName) of
-        {'ok', Version} ->
-            wh_cache:store(?WHISTLE_VERSION_CACHE_KEY, Version),
-            list_to_binary(string:strip(binary_to_list(Version), 'right', $\n));
-        _ ->
-            Version = <<"not available">>,
-            wh_cache:store(?WHISTLE_VERSION_CACHE_KEY, Version),
-            Version
+    VersionFile = filename:join([code:lib_dir('whistle'), "..", "..", "VERSION"]),
+    case file:open(VersionFile, ['read']) of
+        {'ok', File} ->
+            {'ok', Line} = file:read_line(File),
+            file:close(File),
+            wh_util:to_binary(string:strip(Line, 'right', $\n));
+        _ -> <<"unknown">>
     end.
 
 -spec write_pid(ne_binary() | nonempty_string() | iolist()) -> 'ok' | {'error', atom()}.
@@ -1029,6 +1036,58 @@ pretty_print_datetime({{Y,Mo,D},{H,Mi,S}}) ->
     iolist_to_binary(io_lib:format("~4..0w-~2..0w-~2..0w_~2..0w-~2..0w-~2..0w"
                                    ,[Y, Mo, D, H, Mi, S]
                                   )).
+
+-spec rfc1036(calendar:datetime() | gregorian_seconds()) -> ne_binary().
+-spec rfc1036(calendar:datetime() | gregorian_seconds(), ne_binary()) -> ne_binary().
+rfc1036(DateTime) ->
+    rfc1036(DateTime, <<"GMT">>).
+
+rfc1036({Date = {Y, Mo, D}, {H, Mi, S}}, TZ) ->
+    Wday = calendar:day_of_the_week(Date),
+    <<(weekday(Wday))/binary, ", ",
+      (pad_binary_left(to_binary(D), 2, <<"0">>))/binary, " ",
+      (month(Mo))/binary, " ",
+      (to_binary(Y))/binary, " ",
+      (pad_binary_left(to_binary(H), 2, <<"0">>))/binary, ":",
+      (pad_binary_left(to_binary(Mi), 2, <<"0">>))/binary, ":",
+      (pad_binary_left(to_binary(S), 2, <<"0">>))/binary,
+      " ", TZ/binary
+    >>;
+rfc1036(Timestamp, TZ) when is_integer(Timestamp) ->
+    rfc1036(calendar:gregorian_seconds_to_datetime(Timestamp), TZ).
+
+-spec iso8601(calendar:datetime() | gregorian_seconds()) -> ne_binary().
+iso8601({{Y,M,D},_}) ->
+    <<(to_binary(Y))/binary, "-"
+      ,(pad_binary_left(to_binary(M), 2, <<"0">>))/binary, "-"
+      ,(pad_binary_left(to_binary(D), 2, <<"0">>))/binary
+    >>;
+iso8601(Timestamp) when is_integer(Timestamp) ->
+    iso8601(calendar:gregorian_seconds_to_datetime(Timestamp)).
+
+%% borrowed from cow_date.erl
+-spec weekday(1..7) -> <<_:24>>.
+weekday(1) -> <<"Mon">>;
+weekday(2) -> <<"Tue">>;
+weekday(3) -> <<"Wed">>;
+weekday(4) -> <<"Thu">>;
+weekday(5) -> <<"Fri">>;
+weekday(6) -> <<"Sat">>;
+weekday(7) -> <<"Sun">>.
+
+-spec month(1..12) -> <<_:24>>.
+month( 1) -> <<"Jan">>;
+month( 2) -> <<"Feb">>;
+month( 3) -> <<"Mar">>;
+month( 4) -> <<"Apr">>;
+month( 5) -> <<"May">>;
+month( 6) -> <<"Jun">>;
+month( 7) -> <<"Jul">>;
+month( 8) -> <<"Aug">>;
+month( 9) -> <<"Sep">>;
+month(10) -> <<"Oct">>;
+month(11) -> <<"Nov">>;
+month(12) -> <<"Dec">>.
 
 -spec pretty_print_elapsed_s(non_neg_integer()) -> ne_binary().
 pretty_print_elapsed_s(0) -> <<"0s">>;
@@ -1204,25 +1263,6 @@ prop_pretty_print_elapsed_s() ->
                  Result =:= iolist_to_binary(lists:reverse(Expected))
              end).
 
-prop_pretty_print_elapsed_s() ->
-    ?FORALL({D, H, M, S}
-            ,{non_neg_integer(), range(0,23), range(0, 59), range(0,59)}
-            ,begin
-                 Seconds = (D * ?SECONDS_IN_DAY) + (H * ?SECONDS_IN_HOUR) + (M * ?SECONDS_IN_MINUTE) + S,
-                 Expected = lists:foldl(fun({0, "s"}, "") -> ["s", <<"0">>];
-                                           ({0, _}, Acc) -> Acc;
-                                           ({N, Unit}, Acc) -> [Unit, to_binary(N) | Acc]
-                                        end
-                                        ,[]
-                                        ,[{D, "d"}
-                                          ,{H, "h"}
-                                          ,{M, "m"}
-                                          ,{S, "s"}
-                                         ]),
-                 Result = pretty_print_elapsed_s(Seconds),
-                 Result =:= iolist_to_binary(lists:reverse(Expected))
-             end).
-
 proper_test_() ->
     {"Runs the module's PropEr tests during eunit testing",
      {'timeout', 15000,
@@ -1369,5 +1409,23 @@ resolve_uri_test() ->
 
     ?assertEqual(RawPathList, resolve_uri_path(RawPath, Relative)),
     ?assertEqual(RawPathList, resolve_uri_path(RawPath, <<"/", Relative/binary>>)).
+
+rfc1036_test() ->
+    Tests = [{ {{2015,4,7},{1,3,2}}, <<"Tue, 07 Apr 2015 01:03:02 GMT">>}
+             ,{ {{2015,12,12},{12,13,12}}, <<"Sat, 12 Dec 2015 12:13:12 GMT">>}
+             ,{ 63595733389, <<"Wed, 08 Apr 2015 17:29:49 GMT">>}
+            ],
+    lists:foreach(fun({Date, Expected}) ->
+                          ?assertEqual(Expected, rfc1036(Date))
+                  end, Tests).
+
+iso8601_test() ->
+    Tests = [{ {{2015,4,7},{1,3,2}}, <<"2015-04-07">>}
+             ,{ {{2015,12,12},{12,13,12}}, <<"2015-12-12">>}
+             ,{ 63595733389, <<"2015-04-08">>}
+            ],
+    lists:foreach(fun({Date, Expected}) ->
+                          ?assertEqual(Expected, iso8601(Date))
+                  end, Tests).
 
 -endif.

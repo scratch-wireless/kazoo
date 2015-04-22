@@ -557,7 +557,7 @@ load_media_summary(Context, _AccountId) ->
                             )
      ).
 
--spec start_key(cb_context:context()) -> wh_json:json_term() | 'undefined'.
+-spec start_key(cb_context:context()) -> crossbar_doc:startkey().
 start_key(Context) ->
     case crossbar_doc:start_key(Context) of
         'undefined' -> 'undefined';
@@ -632,7 +632,7 @@ load_media_docs_by_language(Context, Language) ->
 load_media_docs_by_language(Context, Language, 'undefined') ->
     fix_start_keys(
       crossbar_doc:load_view(?CB_LIST_BY_LANG
-                              ,[{'startkey_fun', fun(Ctx) -> language_start_key(Ctx, Language) end}
+                             ,[{'startkey_fun', fun(Ctx) -> language_start_key(Ctx, Language) end}
                                ,{'endkey', [Language, wh_json:new()]}
                                ,{'reduce', 'false'}
                                ,{'include_docs', 'false'}
@@ -902,7 +902,7 @@ load_media_binary(Context, MediaId) ->
                       crossbar_doc:load_attachment(cb_context:doc(Context1), Attachment, Context1)
                       ,[{<<"Content-Disposition">>, <<"attachment; filename=", Attachment/binary>>}
                         ,{<<"Content-Type">>, wh_doc:attachment_content_type(cb_context:doc(Context1), Attachment)}
-                        ,{<<"Content-Type">>, wh_doc:attachment_length(cb_context:doc(Context1), Attachment)}
+                        ,{<<"Content-Length">>, wh_doc:attachment_length(cb_context:doc(Context1), Attachment)}
                        ])
             end;
         _Status -> Context1
