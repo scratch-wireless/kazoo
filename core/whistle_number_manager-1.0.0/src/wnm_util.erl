@@ -20,12 +20,17 @@
 -export([is_reconcilable/1]).
 -export([list_carrier_modules/0]).
 -export([get_carrier_module/1]).
--export([number_to_db_name/1]).
--export([normalize_number/1]).
--export([to_e164/1, to_npan/1, to_1npan/1]).
--export([is_e164/1, is_npan/1, is_1npan/1]).
+-export([number_to_db_name/1
+         ,get_all_number_dbs/0
+        ]).
+-export([normalize_number/1, normalize_number/2]).
+-export([to_e164/1, to_e164/2
+         ,to_npan/1, to_1npan/1
+        ]).
+-export([is_e164/1, is_e164/2
+         ,is_npan/1, is_1npan/1
+        ]).
 -export([find_account_id/1]).
--export([get_all_number_dbs/0]).
 -export([are_jobjs_identical/2]).
 
 -ifdef(TEST).
@@ -277,10 +282,10 @@ get_carrier_module(JObj) ->
 %% Create a list of all available carrier modules
 %% @end
 %%--------------------------------------------------------------------
--spec list_carrier_modules() -> [] | [atom(),...].
+-spec list_carrier_modules() -> atoms().
 list_carrier_modules() ->
     CarrierModules =
-        whapps_config:get(?WNM_CONFIG_CAT, <<"carrier_modules">>, ?WNM_DEAFULT_CARRIER_MODULES),
+        whapps_config:get(?WNM_CONFIG_CAT, <<"carrier_modules">>, ?WNM_DEFAULT_CARRIER_MODULES),
     [Module || M <- CarrierModules, (Module = wh_util:try_load_module(M)) =/= 'false'].
 
 %%--------------------------------------------------------------------
@@ -291,15 +296,18 @@ list_carrier_modules() ->
 %%--------------------------------------------------------------------
 -spec number_to_db_name(binary()) -> api_binary().
 number_to_db_name(<<NumPrefix:5/binary, _/binary>>) ->
-    wh_util:to_binary(
-      http_uri:encode(
-        wh_util:to_list(
-          list_to_binary([?WNM_DB_PREFIX, NumPrefix])
-         )
-       )
-     );
+    cow_qs:urlencode(list_to_binary([?WNM_DB_PREFIX, NumPrefix]));
 number_to_db_name(_) ->
     'undefined'.
+
+-spec get_all_number_dbs() -> ne_binaries().
+get_all_number_dbs() ->
+    {'ok', Dbs} = couch_mgr:admin_all_docs(<<"dbs">>, [{'startkey', ?WNM_DB_PREFIX}
+                                                       ,{'endkey', <<?WNM_DB_PREFIX_L, "\ufff0">>}
+                                                      ]),
+    [cow_qs:urlencode(wh_json:get_value(<<"id">>, View))
+     || View <- Dbs
+    ].
 
 %%--------------------------------------------------------------------
 %% @public
@@ -313,12 +321,18 @@ normalize_number(Number) when is_binary(Number) ->
 normalize_number(Number) ->
     normalize_number(wh_util:to_binary(Number)).
 
+-spec normalize_number(binary(), api_binary()) -> binary().
+normalize_number(Number, 'undefined') -> to_e164(Number);
+normalize_number(Number, AccountId) -> to_e164(Number, AccountId).
+
 -spec is_e164(ne_binary()) -> boolean().
 -spec is_npan(ne_binary()) -> boolean().
 -spec is_1npan(ne_binary()) -> boolean().
 
 is_e164(DID) ->
     DID =:= to_e164(DID).
+is_e164(DID, AccountId) ->
+    DID =:= to_e164(DID, AccountId).
 
 is_npan(DID) ->
     re:run(DID, <<"^[2-9][0-9]{2}[2-9][0-9]{6}$">>) =/= 'nomatch'.
@@ -331,8 +345,49 @@ is_1npan(DID) ->
 to_e164(<<$+, _/binary>> = N) -> N;
 to_e164(Number) ->
     Converters = get_e164_converters(),
-    Regexs = wh_json:get_keys(Converters),
-    maybe_convert_to_e164(Regexs, Converters, Number).
+    Regexes = wh_json:get_keys(Converters),
+    maybe_convert_to_e164(Regexes, Converters, Number).
+
+-spec to_e164(ne_binary(), api_binary()) -> ne_binary().
+to_e164(<<$+, _/binary>> = N, _) -> N;
+to_e164(Number, 'undefined') -> to_e164(Number);
+to_e164(Number, <<_/binary>> = Account) ->
+    AccountDb = wh_util:format_account_id(Account, 'encoded'),
+    AccountId = wh_util:format_account_id(Account, 'raw'),
+    case couch_mgr:open_cache_doc(AccountDb, AccountId) of
+        {'ok', JObj} -> to_account_e164(Number, AccountId, wh_json:get_value(<<"dial_plan">>, JObj));
+        {'error', _} -> to_account_e164(Number, AccountId)
+    end.
+
+-spec to_account_e164(ne_binary(), ne_binary(), api_object()) -> ne_binary().
+to_account_e164(Number, AccountId, 'undefined') ->
+    to_account_e164(Number, AccountId);
+to_account_e164(Number, AccountId, DialPlan) ->
+    case wh_json:get_keys(DialPlan) of
+        [] -> to_account_e164(Number, AccountId);
+        Regexes -> to_account_e164(apply_dialplan(Regexes, DialPlan, Number), AccountId)
+    end.
+
+-spec apply_dialplan(wh_json:keys(), wh_json:object(), ne_binary()) -> ne_binary().
+apply_dialplan([], _, Number) -> Number;
+apply_dialplan([Regex|Regexes], DialPlan, Number) ->
+    case re:run(Number, Regex, [{'capture', 'all', 'binary'}]) of
+        'nomatch' ->
+            apply_dialplan(Regexes, DialPlan, Number);
+        'match' ->
+            Number;
+        {'match', Captures} ->
+            Root = lists:last(Captures),
+            Prefix = wh_json:get_binary_value([Regex, <<"prefix">>], DialPlan, <<>>),
+            Suffix = wh_json:get_binary_value([Regex, <<"suffix">>], DialPlan, <<>>),
+            <<Prefix/binary, Root/binary, Suffix/binary>>
+    end.
+
+-spec to_account_e164(ne_binary(), ne_binary()) -> ne_binary().
+to_account_e164(Number, <<_/binary>> = AccountId) ->
+    Converters = get_e164_converters(AccountId),
+    Regexes = wh_json:get_keys(Converters),
+    maybe_convert_to_e164(Regexes, Converters, Number).
 
 maybe_convert_to_e164([], _, Number) -> Number;
 maybe_convert_to_e164([Regex|Regexs], Converters, Number) ->
@@ -371,6 +426,16 @@ get_e164_converters() ->
             Default
     end.
 
+-spec get_e164_converters(ne_binary()) -> wh_json:object().
+get_e164_converters(AccountId) ->
+    Default = wh_json:from_list(?DEFAULT_E164_CONVERTERS),
+    try whapps_account_config:get_global(AccountId, ?WNM_CONFIG_CAT, <<"e164_converters">>, Default) of
+        Converters -> Converters
+    catch
+        _:_ ->
+            Default
+    end.
+
 %%--------------------------------------------------------------------
 %% @public
 %% @doc
@@ -389,22 +454,6 @@ find_account_id(JObj) ->
                    end
                  ],
     lists:foldl(fun(F, A) -> F(A) end, 'undefined', SearchFuns).
-
-%%--------------------------------------------------------------------
-%% @public
-%% @doc
-%% This function will return a list of all number database names
-%% @end
-%%--------------------------------------------------------------------
--spec get_all_number_dbs() -> ne_binaries().
-get_all_number_dbs() ->
-    {'ok', Databases} = couch_mgr:db_info(),
-    [Db || Db <- Databases, is_number_db(Db)].
-
-is_number_db(<<"numbers/", _/binary>>) -> 'true';
-is_number_db(<<"numbers%2f", _/binary>>) -> 'true';
-is_number_db(<<"numbers%2F", _/binary>>) -> 'true';
-is_number_db(_) -> 'false'.
 
 %%--------------------------------------------------------------------
 %% @public

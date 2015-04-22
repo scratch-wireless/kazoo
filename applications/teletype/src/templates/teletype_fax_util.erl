@@ -114,7 +114,7 @@ get_fax_doc(DataJObj, 'false') ->
     case teletype_util:open_doc(<<"fax">>, FaxId, DataJObj) of
         {'ok', JObj} -> JObj;
         {'error', _E} -> get_fax_doc_from_modb(DataJObj, FaxId)
-    end.    
+    end.
 
 -spec get_fax_doc_from_modb(wh_json:object(), ne_binary()) -> wh_json:object().
 get_fax_doc_from_modb(DataJObj, FaxId) ->
