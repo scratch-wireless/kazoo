@@ -47,6 +47,7 @@
           ,errors = [] :: ne_binaries()
           ,original_number :: api_binary()
           ,number :: api_binary()
+          ,account_id :: api_binary()
          }).
 
 -type state() :: #state{}.
@@ -112,9 +113,10 @@ handle_MAIL(From, State) ->
 -spec handle_MAIL_extension(binary(), state()) ->
                                    {'ok', state()} |
                                    'error'.
-handle_MAIL_extension(Extension, _State) ->
-    lager:debug("Unknown MAIL FROM extension ~s", [Extension]),
-    'error'.
+handle_MAIL_extension(Extension, State) ->
+    Error = io_lib:format("554 Unknown MAIL FROM extension ~s", [Extension]),
+    lager:debug(Error),
+    {'error', Error, State}.
 
 -spec handle_RCPT(binary(), state()) ->
                          {'ok', state()} |
@@ -126,9 +128,10 @@ handle_RCPT(To, State) ->
 -spec handle_RCPT_extension(binary(), state()) ->
                                    {'ok', state()} |
                                    'error'.
-handle_RCPT_extension(Extension, _State) ->
-    lager:debug("Unknown RCPT TO extension ~s", [Extension]),
-    'error'.
+handle_RCPT_extension(Extension, State) ->
+    Error = io_lib:format("554 Unknown RCPT TO extension ~s", [Extension]),
+    lager:debug(Error),
+    {'error', Error, State}.
 
 -spec handle_DATA(binary(), ne_binaries(), binary(), state()) ->
                          {'ok', string(), state()} |
@@ -148,12 +151,15 @@ handle_DATA(From, To, Data, #state{options=Options}=State) ->
     try mimemail:decode(Data) of
         {Type, SubType, Headers, Parameters, Body} ->
             lager:debug("Message decoded successfully!"),
-            {ProcessResult, NewState}
-                = process_message(Type, SubType, Headers, Parameters, Body, State),
-            {ProcessResult, Reference, NewState};
+            case process_message(Type, SubType, Headers, Parameters, Body, State) of
+                {ProcessResult, #state{errors=[]}=NewState} ->
+                    {ProcessResult, Reference, NewState};
+                {ProcessResult, #state{errors=[Error | _]}=NewState} ->
+                    {ProcessResult, <<"554 ",Error/binary>>, NewState}
+            end;
         Other ->
             lager:debug("mime decode other ~p", [Other]),
-            {'error', <<"Message decode failed">>, State}
+            {'error', "554 Message decode failed", State#state{errors=[<<"Message decode failed">>]}}
     catch
         _What:_Why ->
             lager:debug("Message decode FAILED with ~p:~p", [_What, _Why]),
@@ -167,7 +173,7 @@ handle_DATA(From, To, Data, #state{options=Options}=State) ->
                         _ -> 'ok'
                     end
             end,
-            {'error', <<"Message decode failed">>, State}
+            {'error', "554 Message decode failed", State#state{errors=[<<"Message decode failed">>]}}
     end.
 
 -spec handle_RSET(state()) -> state().
@@ -235,7 +241,7 @@ maybe_faxbox_save(#state{errors=[_Error | _Errors]}=State) ->
 maybe_faxbox_save(#state{docs=[]}=State) ->
     maybe_faxbox_log(State#state{errors=[<<"no fax documents to save">>]});
 maybe_faxbox_save(#state{filename='undefined'}=State) ->
-    maybe_faxbox_log(State);
+    maybe_faxbox_log(State#state{errors=[<<"no fax attachment to save">>]});
 maybe_faxbox_save(#state{filename=Filename
                          ,content_type=CT
                          ,docs=Docs
@@ -271,7 +277,7 @@ maybe_system_report(State) ->
 maybe_faxbox_log(#state{faxbox=JObj}=State) ->
     AccountId = wh_json:get_value(<<"pvt_account_id">>, JObj),
     case wh_json:is_true(<<"log_errors">>, JObj, 'false')
-        orelse ( whapps_account_config:get(AccountId, ?CONFIG_CAT, <<"log_faxbox_errors">>, 'true')
+        orelse ( whapps_account_config:get_global(AccountId, ?CONFIG_CAT, <<"log_faxbox_errors">>, 'true')
                andalso wh_json:is_true(<<"log_errors">>, JObj, 'true') )
         of
         'true' -> faxbox_log(State);
@@ -364,7 +370,7 @@ check_faxbox(#state{to=To}= State) ->
              );
         _ ->
             lager:debug("invalid address"),
-            {'error', "Not Found", State#state{errors=[<<"invalid address">>]}}
+            {'error', "554 Not Found", State#state{errors=[<<"invalid address">>]}}
     end.
 
 -spec check_number(state()) ->
@@ -374,11 +380,11 @@ check_number(#state{number= <<>>, original_number=Number, faxbox='undefined'}=St
     Error = wh_util:to_binary(
               io_lib:format("fax number ~s is empty, no faxbox to report to", [Number])),
     lager:debug(Error),
-    {'error', "Not Found", State#state{errors=[Error]}};
+    {'error', "554 Not Found", State#state{errors=[Error]}};
 check_number(#state{number= <<>>, original_number=Number, errors=Errors}=State) ->
     Error = wh_util:to_binary(io_lib:format("fax number ~s is empty", [Number])),
     lager:debug(Error),
-    {'error', "Not Found", State#state{errors=[ Error | Errors]}};
+    {'error', "554 Not Found", State#state{errors=[ Error | Errors]}};
 check_number(#state{}=State) ->
     check_permissions(State).
 
@@ -416,7 +422,7 @@ check_permissions(#state{from=From
                       io_lib:format("address ~s is not allowed on faxbox ~s",
                                     [From, wh_json:get_value(<<"_id">>, FaxBoxDoc)])),
             lager:debug(Error),
-            {'error', "not allowed", State#state{errors=[Error | Errors]}}
+            {'error', "554 not allowed", State#state{errors=[Error | Errors]}}
     end.
 
 -spec check_empty_permissions(state()) ->
@@ -428,7 +434,7 @@ check_empty_permissions(#state{errors=Errors}=State) ->
         'false' ->
             Error = <<"faxbox permissions is empty and policy doesn't allow it">>,
             lager:debug(Error),
-            {'error', "not allowed", State#state{errors=[Error | Errors]}}
+            {'error', "554 not allowed", State#state{errors=[Error | Errors]}}
     end.
 
 -spec match(binary(), binary()) -> boolean().
@@ -440,7 +446,7 @@ maybe_faxbox(#state{faxbox_email=Domain}=State) ->
     ViewOptions = [{'key', Domain}, 'include_docs'],
     case couch_mgr:get_results(?WH_FAXES_DB, <<"faxbox/email_address">>, ViewOptions) of
         {'ok', [JObj]} -> maybe_faxbox_owner(State#state{faxbox=wh_json:get_value(<<"doc">>,JObj)});
-        _ -> State
+        _ -> maybe_faxbox_domain(State)
     end.
 
 -spec maybe_faxbox_owner(state()) -> state().
@@ -456,6 +462,95 @@ maybe_faxbox_owner(#state{faxbox=FaxBoxDoc}=State) ->
                     State#state{owner_id=OwnerId, owner_email=OwnerEmail};
                 _ -> State
             end
+    end.
+
+-spec maybe_faxbox_domain(state()) -> state().
+maybe_faxbox_domain(#state{faxbox_email=Domain}=State) ->
+    ViewOptions = [{'key', Domain}],
+    case couch_mgr:get_results(?WH_ACCOUNTS_DB, <<"accounts/listing_by_realm">>, ViewOptions) of
+        {'ok', []} ->
+            Error = <<"realm ", Domain/binary, " not found in accounts db">>,
+            lager:debug(Error),
+            {'error', "not allowed", State#state{errors=[Error]}};
+        {'ok', [JObj]} ->
+            AccountId = wh_json:get_value(<<"id">>, JObj),
+            maybe_faxbox_by_owner_email(AccountId, State);
+        {'ok', [_JObj | _JObjs]} ->
+            Error = <<"accounts query by realm ", Domain/binary, " return more than one document">>,
+            lager:debug(Error),
+            {'error', "not allowed", State#state{errors=[Error]}};
+        {'error', _E} ->
+            Error = <<"error searching realm ", Domain/binary>>,
+            lager:debug("error ~p querying realm in accounts database",[_E]),
+            {'error', "not allowed", State#state{errors=[Error]}}
+    end.
+
+-spec maybe_faxbox_by_owner_email(ne_binary(), state()) -> state().
+maybe_faxbox_by_owner_email(AccountId, #state{from=From}=State) ->
+    ViewOptions = [{'key', From}],
+    AccountDb = wh_util:format_account_db(AccountId),
+    case couch_mgr:get_results(AccountDb, <<"users/list_by_email">>, ViewOptions) of
+        {'ok', []} ->
+            lager:debug("user ~s does not exist in account ~s, trying by rules",[From, AccountId]),
+            maybe_faxbox_by_rules(AccountId, State);
+        {'ok', [JObj]} ->
+            OwnerId = wh_json:get_value(<<"id">>, JObj),
+            maybe_faxbox_by_owner_id(AccountId, OwnerId, State);
+        {'ok', [_JObj | _JObjs]} ->
+            lager:debug("more then one user with email ~s in account ~s, trying by rules", [From, AccountId]),
+            maybe_faxbox_by_rules(AccountId, State);
+        {'error', _E} ->
+            lager:debug("error ~p getting user by email ~s  in account ~s, trying by rules",[_E, From, AccountId]),
+            maybe_faxbox_by_rules(AccountId, State)
+    end.
+
+-spec maybe_faxbox_by_owner_id(ne_binary(), ne_binary(),state()) -> state().
+maybe_faxbox_by_owner_id(AccountId, OwnerId, #state{from=From}=State) ->
+    ViewOptions = [{'key', OwnerId}, 'include_docs'],
+    AccountDb = wh_util:format_account_db(AccountId),
+    case couch_mgr:get_results(AccountDb, <<"faxbox/list_by_ownerid">>, ViewOptions) of
+        {'ok', [JObj]} ->
+            State#state{faxbox=wh_json:get_value(<<"doc">>,JObj)
+                        ,owner_id=OwnerId
+                        ,owner_email=From
+                       };
+        _ ->
+            lager:debug("user ~s : ~s from account ~s does not have a faxbox, trying by rules"
+                        ,[OwnerId, From, AccountId]
+                       ),
+            maybe_faxbox_by_rules(AccountId
+                                  ,State#state{owner_id=OwnerId
+                                               ,owner_email=From
+                                              }
+                                 )
+    end.
+
+-spec maybe_faxbox_by_rules(ne_binary() | wh_json:objects(), state()) -> state().
+maybe_faxbox_by_rules(AccountId, State)
+  when is_binary(AccountId) ->
+    ViewOptions = ['include_docs'],
+    AccountDb = wh_util:format_account_db(AccountId),
+    case couch_mgr:get_results(AccountDb, <<"faxbox/email_permissions">>, ViewOptions) of
+        {'ok', []} ->
+            Error = <<"no faxboxes for account ~s ", AccountId/binary>>,
+            lager:debug(Error),
+            {'error', "not allowed", State#state{errors=[Error]}};
+        {'ok', JObjs} -> maybe_faxbox_by_rules(JObjs, State#state{account_id=AccountId});
+        {'error', _E} ->
+            Error = <<"error getting faxbox email permissions for account ", AccountId/binary>>,
+            lager:debug(Error),
+            lager:debug("error ~p", [_E]),
+            {'error', "not allowed", State#state{errors=[Error]}}
+    end;
+maybe_faxbox_by_rules([], #state{account_id=AccountId, from=From}=State) ->
+    Error = <<"no mathing rules in account ", AccountId/binary, " for ", From/binary >>,
+    lager:debug(Error),
+    {'error', "not allowed", State#state{errors=[Error]}};
+maybe_faxbox_by_rules([JObj | JObjs], #state{from=From}=State) ->
+    Key = wh_json:get_value(<<"key">>, JObj),
+    case match(From, Key) of
+        'true' -> State#state{faxbox=wh_json:get_value(<<"doc">>, JObj)};
+        'false' -> maybe_faxbox_by_rules(JObjs, State)
     end.
 
 -spec add_fax_document(state()) ->
@@ -496,7 +591,7 @@ add_fax_document(#state{docs=Docs
                ,{<<"to_name">>, FaxNumber}
                ,{<<"to_number">>, FaxNumber}
                ,{<<"retries">>, wh_json:get_value(<<"retries">>, FaxBoxDoc, 3)}
-               ,{<<"notifications">>, Notify }
+               ,{<<"notifications">>, Notify}
                ,{<<"faxbox_id">>, FaxBoxId}
                ,{<<"folder">>, <<"outbox">>}
               ]),
@@ -516,7 +611,7 @@ add_fax_document(#state{docs=Docs
 %% ====================================================================
 %% Internal functions
 %% ====================================================================
-process_message(<<"multipart">>, <<"mixed">>, _Headers, _Parameters, Body, State) ->
+process_message(<<"multipart">>, <<"mixed">>, _Headers, _Parameters, Body, #state{errors=Errors}=State) ->
     lager:debug("processing multipart/mixed"),
     case Body of
         {Type, SubType, HeadersPart, ParametersPart, BodyPart} ->
@@ -531,12 +626,14 @@ process_message(<<"multipart">>, <<"mixed">>, _Headers, _Parameters, Body, State
             process_parts(Parts, State);
         A ->
             lager:debug("missed processing ~p", [A]),
-            {'ok', State}
+            {'ok', State#state{errors=[<<"invalid body">> | Errors]}}
     end;
 process_message(_Type, _SubType, _Headers, _Parameters, _Body, State) ->
     lager:debug("skipping ~s/~s",[_Type, _SubType]),
     {'ok', State}.
 
+process_parts([], #state{filename='undefined', errors=Errors}=State) ->
+    {'ok', State#state{errors=[<<"no valid attachment">> | Errors]}};
 process_parts([], State) ->
     {'ok', State};
 process_parts([Part|Parts], State) ->
