@@ -302,7 +302,6 @@ should_restrict_call_by_account(Call, Classification) ->
     AccountId = whapps_call:account_id(Call),
     AccountDb = whapps_call:account_db(Call),
     case couch_mgr:open_cache_doc(AccountDb, AccountId) of
-        {'error', _} -> 'false';
         {'error', _E} ->
             lager:error("failed to open account doc: ~p", [_E]),
             'false';
