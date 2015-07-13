@@ -56,8 +56,8 @@ start_link() ->
 %% @end
 %%--------------------------------------------------------------------
 init([]) ->
-    put('callid', ?MODULE),
-    ensure_template(),
+    wh_util:put_callid(?MODULE),
+    _ = ensure_template(),
     lager:debug("omnipresence event dialog package started"),
     {'ok', #state{}}.
 
@@ -93,18 +93,15 @@ handle_cast({'gen_listener',{'created_queue',_Queue}}, State) ->
     {'noreply', State};
 handle_cast({'gen_listener',{'is_consuming',_IsConsuming}}, State) ->
     {'noreply', State};
-handle_cast({'omnipresence',{'x_subscribe_notify', <<"dialog">>, User, #omnip_subscription{}=_Subscription}}, State) ->
-    spawn(fun() -> initial_update(User) end),
-    {'noreply', State};
-handle_cast({'omnipresence',{'x_resubscribe_notify', <<"dialog">>, User, #omnip_subscription{}=_Subscription}}, State) ->
-    spawn(fun() -> initial_update(User) end),
+handle_cast({'omnipresence',{'subscription_reset', <<"dialog">>, User, #omnip_subscription{}=_Subscription}}, State) ->
+    _ = wh_util:spawn(fun() -> reset_blf(User) end),
     {'noreply', State};
 handle_cast({'omnipresence',{'channel_event', JObj}}, State) ->
     EventType = wh_json:get_value(<<"Event-Name">>, JObj),
-    spawn(fun() -> channel_event(EventType, JObj) end),
+    _ = wh_util:spawn(fun() -> channel_event(EventType, JObj) end),
     {'noreply', State};
 handle_cast({'omnipresence',{'presence_update', JObj}}, State) ->
-    spawn(fun() -> presence_event(JObj) end),
+    _ = wh_util:spawn(fun() -> presence_event(JObj) end),
     {'noreply', State};
 handle_cast({'omnipresence', _}, State) ->
     {'noreply', State};
@@ -179,24 +176,24 @@ channel_event(_, _JObj) -> 'ok'.
 handle_new_channel(JObj) ->
     'true' = wapi_call:event_v(JObj),
     wh_util:put_callid(JObj),
-    lager:debug("received channel create, checking for subscribers"),
+    lager:debug("received channel create, checking for dialog subscribers"),
     handle_update(JObj, ?PRESENCE_RINGING).
 
--spec handle_answered_channel(wh_json:object()) -> any().
+-spec handle_answered_channel(wh_json:object()) -> 'ok'.
 handle_answered_channel(JObj) ->
     'true' = wapi_call:event_v(JObj),
     wh_util:put_callid(JObj),
     lager:debug("received channel answer, checking for subscribers"),
     handle_update(JObj, ?PRESENCE_ANSWERED).
 
--spec handle_destroyed_channel(wh_json:object()) -> any().
+-spec handle_destroyed_channel(wh_json:object()) -> 'ok'.
 handle_destroyed_channel(JObj) ->
     'true' = wapi_call:event_v(JObj),
     wh_util:put_callid(JObj),
-    lager:debug("received channel destroy, checking for subscribers"),
+    lager:debug("received channel destroy, checking for dialog subscribers"),
     handle_update(JObj, ?PRESENCE_HANGUP).
 
--spec handle_disconnected_channel(wh_json:object()) -> any().
+-spec handle_disconnected_channel(wh_json:object()) -> 'ok'.
 handle_disconnected_channel(JObj) ->
     'true' = wapi_call:event_v(JObj),
     wh_util:put_callid(JObj),
@@ -214,14 +211,6 @@ handle_disconnected_channel(JObj) ->
 handle_connected_channel(_JObj) ->
     'ok'.
 
--spec initial_update(ne_binary()) -> any().
-initial_update(User) ->
-    Headers = [{<<"From">>, User}
-               ,{<<"To">>, User}
-               ,{<<"Call-ID">>, wh_util:rand_hex_binary(16)}
-              ],
-    handle_update(wh_json:from_list(Headers), ?PRESENCE_HANGUP).
-
 -spec presence_event(wh_json:object()) -> 'ok'.
 presence_event(JObj) ->
     State = wh_json:get_value(<<"State">>, JObj),
@@ -237,7 +226,7 @@ maybe_handle_presence_state(JObj, ?PRESENCE_RINGING=State) ->
 maybe_handle_presence_state(JObj, State) ->
     handle_update(JObj, State, 0).
 
--spec handle_update(wh_json:object(), ne_binary()) -> any().
+-spec handle_update(wh_json:object(), ne_binary()) -> 'ok'.
 handle_update(JObj, ?PRESENCE_HANGUP) ->
     handle_update(JObj, ?PRESENCE_HANGUP, 10);
 handle_update(JObj, ?PRESENCE_RINGING) ->
@@ -256,7 +245,7 @@ handle_update(JObj, State, Expires) ->
         'false' -> lager:warning("dialog handler ignoring update from ~s to ~s", [From, To])
     end.
 
--spec handle_update(wh_json:object(), ne_binary(), ne_binary(), ne_binary(), integer()) -> any().
+-spec handle_update(wh_json:object(), ne_binary(), ne_binary(), ne_binary(), integer()) -> 'ok'.
 handle_update(JObj, State, From, To, Expires) ->
     [ToUsername, ToRealm] = binary:split(To, <<"@">>),
     [FromUsername, FromRealm] = binary:split(From, <<"@">>),
@@ -297,7 +286,7 @@ handle_update(JObj, State, From, To, Expires) ->
                 };
             _Direction ->
                 App = wh_json:get_value(<<"App-Name">>, JObj),
-                ToURI = build_update_to_uri(State, App, From, Cookie),
+                ToURI = build_update_to_uri(State, App, From, ToRealm, Cookie),
                 {To, props:filter_undefined(
                        [{<<"From">>, <<"sip:", To/binary>>}
                         ,{<<"From-User">>, ToUsername}
@@ -328,12 +317,23 @@ handle_update(JObj, State, From, To, Expires) ->
         end,
     maybe_send_update(User, Props).
 
--spec build_update_to_uri(ne_binary(), ne_binary(), ne_binary(), ne_binary()) -> ne_binary().
-build_update_to_uri(?PRESENCE_RINGING, <<"park">>, _From, Cookie) ->
-    <<"sip:kfp+", Cookie/binary>>;
-build_update_to_uri(?PRESENCE_RINGING, _, _From, Cookie) ->
-    <<"sip:kfp+", Cookie/binary>>;
-build_update_to_uri(_State, _App, From, _Cookie) ->
+-spec build_update_to_uri(ne_binary(), ne_binary(), ne_binary(), ne_binary(), ne_binary()) -> ne_binary().
+build_update_to_uri(State, App, From, Realm, Cookie) ->
+    case whapps_config:get(<<"omnipresence">>, <<"use_fast_pickup_cookies">>, 'true') of
+        'true' -> to_uri_cookie(State, App, From, Realm, Cookie);
+        _Other -> to_uri(State, App, From, Realm, Cookie)
+    end.
+
+-spec to_uri(ne_binary(), ne_binary(), ne_binary(), ne_binary(), ne_binary()) -> ne_binary().
+to_uri(?PRESENCE_RINGING, <<"park">>, From, _, _) ->
+    <<"sip:", From/binary,";kazoo-pickup=true">>;
+to_uri(_State, _, From, _, _) ->
+    <<"sip:", From/binary>>.
+
+-spec to_uri_cookie(ne_binary(), ne_binary(), ne_binary(), ne_binary(), ne_binary()) -> ne_binary().
+to_uri_cookie(?PRESENCE_RINGING, _, _, Realm, Cookie) ->
+    <<"sip:kfp+", Cookie/binary, "@", Realm/binary>>;
+to_uri_cookie(_State, _, From, _, _) ->
     <<"sip:", From/binary>>.
 
 -spec maybe_send_update(ne_binary(), wh_proplist()) -> 'ok'.
@@ -357,12 +357,12 @@ send_update(<<"amqp">>, _User, Props, Subscriptions) ->
     lager:debug("sending AMQP dialog update: ~p", [Props]),
     Stalkers = lists:usort([St || #omnip_subscription{stalker=St} <- Subscriptions]),
     {'ok', Worker} = wh_amqp_worker:checkout_worker(),
-    [wh_amqp_worker:cast(Props
-                         ,fun(P) -> wapi_omnipresence:publish_update(S, P) end
-                         , Worker
-                        )
-     || S <- Stalkers
-    ],
+    _ = [wh_amqp_worker:cast(Props
+                             ,fun(P) -> wapi_omnipresence:publish_update(S, P) end
+                             , Worker
+                            )
+         || S <- Stalkers
+        ],
     wh_amqp_worker:checkin_worker(Worker);
 send_update(<<"sip">>, User, Props, Subscriptions) ->
     lager:debug("building SIP dialog update: ~p", [Props]),
@@ -453,7 +453,8 @@ build_variables(User, Props) ->
 -spec build_body(ne_binary(), wh_proplist()) -> ne_binary().
 build_body(User, Props) ->
     Variables = build_variables(User, Props),
-    {'ok', Text} = sub_package_dialog:render(Variables),
+    Mod = wh_util:to_atom(<<"sub_package_dialog">>, 'true'),
+    {'ok', Text} = Mod:render(Variables),
     Body = wh_util:to_binary(Text),
     binary:replace(Body, <<"\n\n">>, <<"\n">>, ['global']).
 
@@ -470,6 +471,7 @@ reset_blf(User) ->
                ,{<<"To">>, User}
                ,{<<"Flush-Level">>, 1}
                ,{<<"Call-ID">>, wh_util:to_hex_binary(crypto:hash(md5, User))}
+               | wh_api:default_headers(?APP_NAME, ?APP_VERSION)
               ],
     handle_update(wh_json:from_list(Headers), ?PRESENCE_HANGUP).
 

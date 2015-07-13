@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%%% @copyright (C) 2011-2013, 2600Hz
+%%% @copyright (C) 2011-2015, 2600Hz
 %%% @doc
 %%% The basic flow of a directory call:
 %%% 1) Prompt: Please enter the first few letters of the person's
@@ -107,10 +107,15 @@
 %%--------------------------------------------------------------------
 -spec handle(wh_json:object(), whapps_call:call()) -> 'ok'.
 handle(Data, Call) ->
-    {'ok', DirJObj} = couch_mgr:open_doc(whapps_call:account_db(Call), wh_json:get_value(<<"id">>, Data)),
+    {'ok', DirJObj} = couch_mgr:open_cache_doc(whapps_call:account_db(Call)
+                                               ,wh_doc:id(Data)
+                                              ),
     whapps_call_command:answer(Call),
 
-    case get_directory_listing(whapps_call:account_db(Call), wh_json:get_value(<<"_id">>, DirJObj)) of
+    case get_directory_listing(whapps_call:account_db(Call)
+                               ,wh_doc:id(DirJObj)
+                              )
+    of
         {'ok', Users} ->
             State = #directory{
                        sort_by = get_sort_by(wh_json:get_value(<<"sort_by">>, DirJObj, <<"last_name">>))
@@ -258,7 +263,7 @@ username_audio_macro(Call, User) ->
     case media_name(User) of
         'undefined' -> {'tts', <<39, (full_name(User))/binary, 39>>}; % 39 is ascii '
         MediaID ->
-            {'prompt', <<$/, (whapps_call:account_db(Call))/binary, $/, MediaID/binary>>}
+            {'play', <<$/, (whapps_call:account_db(Call))/binary, $/, MediaID/binary>>}
     end.
 
 -spec play_directory_instructions(whapps_call:call(), 'first' | 'last' | ne_binary()) ->

@@ -54,7 +54,7 @@
 
 -define(ORIGINATE_PARK, <<"&park()">>).
 -define(ORIGINATE_EAVESDROP, <<"eavesdrop">>).
--define(REPLY_TIMEOUT, 5000).
+-define(REPLY_TIMEOUT, 5 * ?MILLISECONDS_IN_SECOND).
 
 %%%===================================================================
 %%% API
@@ -202,7 +202,7 @@ handle_cast({'create_uuid'}, #state{node=Node
                                     ,uuid='undefined'
                                    }=State) ->
     UUID = {_, Id} = create_uuid(JObj, Node),
-    put('callid', Id),
+    wh_util:put_callid(Id),
     lager:debug("created uuid ~p", [UUID]),
     wh_cache:store_local(?ECALLMGR_UTIL_CACHE, {Id, 'start_listener'}, 'true'),
 
@@ -300,7 +300,7 @@ handle_cast({'originate_execute'}, #state{dialstrings=Dialstrings
 
             {'stop', 'normal', State#state{control_pid='undefined'}};
         {'ok', CallId} ->
-            put('callid', CallId),
+            wh_util:put_callid(CallId),
             lager:debug("originate is executing, waiting for completion"),
             erlang:monitor_node(Node, 'true'),
             bind_to_call_events(CallId),
@@ -553,18 +553,26 @@ maybe_add_loopback(JObj, Props) ->
                                {'error', ne_binary() | 'timeout' | 'crash'}.
 originate_execute(Node, Dialstrings, Timeout) ->
     lager:debug("executing on ~s: ~s", [Node, Dialstrings]),
-    case freeswitch:api(Node, 'originate', wh_util:to_list(Dialstrings), Timeout*1000) of
+    case freeswitch:api(Node
+                        ,'originate'
+                        ,wh_util:to_list(Dialstrings)
+                        ,Timeout*?MILLISECONDS_IN_SECOND
+                       )
+    of
         {'ok', <<"+OK ", ID/binary>>} ->
             UUID = wh_util:strip_binary(binary:replace(ID, <<"\n">>, <<>>)),
             Media = get('hold_media'),
-            _Pid = spawn(fun() -> set_music_on_hold(Node, UUID, Media) end),
+            _Pid = wh_util:spawn(fun() -> set_music_on_hold(Node, UUID, Media) end),
             {'ok', UUID};
         {'ok', Other} ->
             lager:debug("recv other 'ok': ~s", [Other]),
             {'error', wh_util:strip_binary(binary:replace(Other, <<"\n">>, <<>>))};
-        {'error', Error} ->
+        {'error', Error} when is_binary(Error) ->
             lager:debug("error originating: ~s", [Error]),
-            {'error', wh_util:strip_binary(binary:replace(Error, <<"\n">>, <<>>))}
+            {'error', wh_util:strip_binary(binary:replace(Error, <<"\n">>, <<>>))};
+        {'error', _Reason} ->
+            lager:debug("error originating: ~p", [_Reason]),
+            {'error', <<"unspecified">>}
     end.
 
 -spec set_music_on_hold(atom(), ne_binary(), api_binary()) -> 'ok'.
@@ -588,7 +596,7 @@ unbind_from_call_events() ->
 
 -spec update_uuid(api_binary(), ne_binary()) -> 'ok'.
 update_uuid(OldUUID, NewUUID) ->
-    put('callid', NewUUID),
+    wh_util:put_callid(NewUUID),
     lager:debug("updating call id from ~s to ~s", [OldUUID, NewUUID]),
     unbind_from_call_events(),
     bind_to_call_events(NewUUID),
@@ -601,7 +609,7 @@ update_uuid(OldUUID, NewUUID) ->
 create_uuid(Node) ->
     case freeswitch:api(Node, 'create_uuid', " ") of
         {'ok', UUID} ->
-            put('callid', UUID),
+            wh_util:put_callid(UUID),
             lager:debug("FS generated our uuid: ~s", [UUID]),
             {'fs', UUID};
         {'error', _E} ->
@@ -621,7 +629,7 @@ create_uuid(Endpoint, JObj, Node) ->
         CallId -> {'api', CallId}
     end.
 
--spec get_unset_vars(wh_json:object()) -> string().
+-spec get_unset_vars(wh_json:object()) -> iolist().
 get_unset_vars(JObj) ->
     %% Refactor (Karl wishes he had unit tests here for you to use)
     ExportProps = [{K, <<>>} || K <- wh_json:get_value(<<"Export-Custom-Channel-Vars">>, JObj, [])],
@@ -636,15 +644,35 @@ get_unset_vars(JObj) ->
                  ,not lists:member(begin [K, _] = string:tokens(binary_to_list(KV), "="), K end, Export)]
     of
         [] -> "";
-        Unset -> [string:join(Unset, "^"), maybe_fix_fs_auto_answer_bug(Export)]
+        Unset ->
+            [string:join(Unset, "^")
+            ,maybe_fix_ignore_early_media(Export)
+            ,maybe_fix_group_confirm(Export)
+            ,maybe_fix_fs_auto_answer_bug(Export)
+            ,"^"
+            ]
+    end.
+
+-spec maybe_fix_ignore_early_media(strings()) -> string().
+maybe_fix_ignore_early_media(Export) ->
+    case lists:member("ignore_early_media", Export) of
+        'true' -> "";
+        'false' -> "^unset:ignore_early_media"
+    end.
+
+-spec maybe_fix_group_confirm(strings()) -> string().
+maybe_fix_group_confirm(Export) ->
+    case lists:member("group_confirm_key", Export) of
+        'true' -> "";
+        'false' -> "^unset:group_confirm_key^unset:group_confirm_cancel_timeout^unset:group_confirm_file"
     end.
 
 -spec maybe_fix_fs_auto_answer_bug(strings()) -> string().
 maybe_fix_fs_auto_answer_bug(Export) ->
     case lists:member("sip_auto_answer", Export) of
-        'true' -> "^";
+        'true' -> "";
         'false' ->
-            "^unset:sip_h_Call-Info^unset:sip_h_Alert-Info^unset:alert_info^unset:sip_invite_params^set:sip_auto_answer=false^"
+            "^unset:sip_h_Call-Info^unset:sip_h_Alert-Info^unset:alert_info^unset:sip_invite_params^set:sip_auto_answer=false"
     end.
 
 -spec publish_error(ne_binary(), created_uuid() | api_binary(), wh_json:object(), api_binary()) -> 'ok'.

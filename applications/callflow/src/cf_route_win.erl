@@ -21,10 +21,10 @@
          ,maybe_restrict_call/2
         ]).
 
--spec handle_req(wh_json:object(), wh_proplist()) -> any().
+-spec handle_req(wh_json:object(), wh_proplist()) -> _.
 handle_req(JObj, _Options) ->
     CallId = wh_json:get_value(<<"Call-ID">>, JObj),
-    put('callid', CallId),
+    wh_util:put_callid(CallId),
     lager:info("callflow has received a route win, taking control of the call"),
     case whapps_call:retrieve(CallId, ?APP_NAME) of
         {'ok', Call} ->
@@ -56,7 +56,7 @@ should_restrict_call(Call) ->
 
 -spec maybe_service_unavailable(wh_json:object(), whapps_call:call()) -> boolean().
 maybe_service_unavailable(JObj, Call) ->
-    Id = wh_json:get_value(<<"_id">>, JObj),
+    Id = wh_doc:id(JObj),
     Services = wh_json:merge_recursive(
                  wh_json:get_value(<<"services">>, JObj, ?DEFAULT_SERVICES),
                  wh_json:get_value(<<"pvt_services">>, JObj, wh_json:new())),
@@ -71,8 +71,7 @@ maybe_service_unavailable(JObj, Call) ->
 -spec maybe_account_service_unavailable(wh_json:object(), whapps_call:call()) -> boolean().
 maybe_account_service_unavailable(JObj, Call) ->
     AccountId = whapps_call:account_id(Call),
-    AccountDb = whapps_call:account_db(Call),
-    {'ok', Doc} = couch_mgr:open_cache_doc(AccountDb, AccountId),
+    {'ok', Doc} = kz_account:fetch(AccountId),
     Services = wh_json:merge_recursive(
                  wh_json:get_value(<<"services">>, Doc, ?DEFAULT_SERVICES),
                  wh_json:get_value(<<"pvt_services">>, Doc, wh_json:new())),
@@ -93,8 +92,11 @@ maybe_closed_group_restriction(JObj, Call) ->
 
 -spec maybe_classification_restriction(wh_json:object(), whapps_call:call()) -> boolean().
 maybe_classification_restriction(JObj, Call) ->
-    Number = whapps_call:request_user(Call),
-    Classification = wnm_util:classify_number(Number),
+    Request = whapps_call:request_user(Call),
+    AccountId = whapps_call:account_id(Call),
+    DialPlan = wh_json:get_value(<<"dial_plan">>, JObj, wh_json:new()),
+    Number = wnm_util:to_e164(Request, AccountId, DialPlan),
+    Classification = wnm_util:classify_number(Number, AccountId),
     lager:debug("classified number as ~s, testing for call restrictions", [Classification]),
     wh_json:get_value([<<"call_restriction">>, Classification, <<"action">>], JObj) =:= <<"deny">>.
 
@@ -152,9 +154,7 @@ get_group_associations(Id, Groups, Set) ->
     lists:foldl(fun(Group, S) ->
                         case wh_json:get_value([<<"value">>, Id], Group) of
                             'undefined' -> S;
-                            _Else ->
-                                GroupId = wh_json:get_value(<<"id">>, Group),
-                                sets:add_element(GroupId, S)
+                            _Else -> sets:add_element(wh_doc:id(Group), S)
                         end
                 end, Set, Groups).
 
@@ -213,7 +213,7 @@ set_language(Call) ->
     Default = wh_media_util:prompt_language(whapps_call:account_id(Call)),
     case cf_endpoint:get(Call) of
         {'ok', Endpoint} ->
-            Language = wh_json:get_value(<<"language">>, Endpoint, Default),
+            Language = kz_device:language(Endpoint, Default),
             lager:debug("setting language '~s' for this call", [Language]),
             whapps_call:set_language(wh_util:to_lower_binary(Language), Call);
         {'error', _E} ->
@@ -233,7 +233,11 @@ update_ccvs(Call) ->
                        'undefined' -> <<"internal">>;
                        _Else -> <<"external">>
                    end,
-    {CIDNumber, CIDName} = cf_attributes:caller_id(CallerIdType, Call),
+    {CIDNumber, CIDName} =
+        cf_attributes:caller_id(
+          CallerIdType
+          ,whapps_call:kvs_erase('prepend_cid_name', Call)
+         ),
     lager:info("bootstrapping with caller id type ~s: \"~s\" ~s"
                ,[CallerIdType, CIDName, CIDNumber]
               ),

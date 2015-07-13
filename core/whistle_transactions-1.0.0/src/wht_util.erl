@@ -18,6 +18,7 @@
 -export([base_call_cost/3]).
 -export([current_balance/1
          ,previous_balance/3
+         ,current_account_dollars/1
         ]).
 -export([get_balance_from_account/2]).
 -export([call_cost/1]).
@@ -242,6 +243,17 @@ get_rollup_balance(Account, ViewOptions) ->
 %%
 %% @end
 %%--------------------------------------------------------------------
+-spec current_account_dollars(ne_binary()) -> float().
+current_account_dollars(Account) ->
+    Units = wht_util:current_balance(Account),
+    wht_util:units_to_dollars(Units).
+
+%%--------------------------------------------------------------------
+%% @public
+%% @doc
+%%
+%% @end
+%%--------------------------------------------------------------------
 -spec get_balance_from_account(ne_binary(), wh_proplist()) -> integer().
 get_balance_from_account(Account, ViewOptions) ->
     View = <<"transactions/credit_remaining">>,
@@ -382,8 +394,10 @@ is_valid_reason(Reason) ->
 %%--------------------------------------------------------------------
 -spec reason_code(ne_binary()) -> pos_integer().
 reason_code(Reason) ->
-    {_, Code} = lists:keyfind(Reason, 1, ?REASONS),
-    Code.
+    case lists:keyfind(Reason, 1, ?REASONS) of
+        'false' -> ?CODE_UNKNOWN;
+        {_, Code} -> Code
+    end.
 
 %%--------------------------------------------------------------------
 %% @public
@@ -391,10 +405,12 @@ reason_code(Reason) ->
 %%
 %% @end
 %%--------------------------------------------------------------------
--spec code_reason(pos_integer()) -> ne_binary().
+-spec code_reason(pos_integer()) -> api_binary().
 code_reason(Code) ->
-    {Reason, _} = lists:keyfind(Code, 2, ?REASONS),
-    Reason.
+    case lists:keyfind(Code, 2, ?REASONS) of
+        'false' -> <<"unknown">>;
+        {Reason, _} -> Reason
+    end.
 
 %%--------------------------------------------------------------------
 %% @public

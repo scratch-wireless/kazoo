@@ -53,7 +53,7 @@
                   ,account_id :: api_binary() | '$1' | '_'
                   ,account_billing :: api_binary() | '$1' | '_'
                   ,account_allotment = 'false' :: boolean() | '_'
-                  ,reseller_id :: api_binary() | '$1' | '_'
+                  ,reseller_id :: api_binary() | '$1' | '$2' | '_'
                   ,reseller_billing :: api_binary() | '$1' | '_'
                   ,reseller_allotment = 'false' :: boolean() | '_'
                   ,soft_limit = 'false' :: boolean() | '_'
@@ -69,6 +69,7 @@
                   ,rate_id :: api_binary() | '_'
                   ,base_cost :: api_binary() | '_'
                  }).
+
 -type channel() :: #channel{}.
 -type channels() :: [channel(),...] | [].
 -export_type([channel/0
@@ -77,20 +78,23 @@
 
 -define(BINDINGS, [{'authz', [{'restrict_to', ['broadcast']}
                               ,'federate'
-                             ]}
+                             ]
+                   }
                    ,{'rate', [{'restrict_to', ['broadcast']}
                               ,'federate'
-                             ]}
+                             ]
+                    }
                   ]).
 -define(RESPONDERS, [{{?MODULE, 'handle_authz_resp'}
-                      ,[{<<"authz">>, <<"authz_resp">>}]}
+                      ,[{<<"authz">>, <<"authz_resp">>}]
+                     }
                      ,{{?MODULE, 'handle_rate_resp'}
-                       ,[{<<"rate">>, <<"resp">>}]}
+                       ,[{<<"rate">>, <<"resp">>}]
+                      }
                     ]).
 -define(QUEUE_NAME, <<>>).
 -define(QUEUE_OPTIONS, []).
 -define(CONSUME_OPTIONS, []).
-
 
 %%%===================================================================
 %%% API
@@ -104,12 +108,16 @@
 %% @end
 %%--------------------------------------------------------------------
 start_link() ->
-    gen_listener:start_link({'local', ?SERVER}, ?MODULE, [{'bindings', ?BINDINGS}
-                                                          ,{'responders', ?RESPONDERS}
-                                                          ,{'queue_name', ?QUEUE_NAME}
-                                                          ,{'queue_options', ?QUEUE_OPTIONS}
-                                                          ,{'consume_options', ?CONSUME_OPTIONS}
-                                                         ], []).
+    gen_listener:start_link({'local', ?SERVER}
+                            ,?MODULE
+                            ,[{'bindings', ?BINDINGS}
+                              ,{'responders', ?RESPONDERS}
+                              ,{'queue_name', ?QUEUE_NAME}
+                              ,{'queue_options', ?QUEUE_OPTIONS}
+                              ,{'consume_options', ?CONSUME_OPTIONS}
+                             ]
+                            ,[]
+                           ).
 
 -spec sync() -> 'ok'.
 sync() -> gen_server:cast(?SERVER, 'synchronize_channels').
@@ -607,16 +615,16 @@ from_jobj(JObj) ->
              ,direction = wh_json:get_value(<<"Call-Direction">>, JObj)
              ,account_id = wh_json:get_value(<<"Account-ID">>, CCVs)
              ,account_billing = AccountBilling
-             ,account_allotment = is_alloment(AccountBilling)
+             ,account_allotment = is_allotment(AccountBilling)
              ,reseller_id = wh_json:get_value(<<"Reseller-ID">>, CCVs)
              ,reseller_billing = ResellerBilling
-             ,reseller_allotment = is_alloment(ResellerBilling)
+             ,reseller_allotment = is_allotment(ResellerBilling)
              ,soft_limit = wh_json:is_true(<<"Soft-Limit">>, JObj)
             }.
 
--spec is_alloment(ne_binary()) -> boolean().
-is_alloment(<<"allotment_", _/binary>>) -> 'true';
-is_alloment(_) -> 'false'.
+-spec is_allotment(ne_binary()) -> boolean().
+is_allotment(<<"allotment_", _/binary>>) -> 'true';
+is_allotment(_) -> 'false'.
 
 -type unique_channel() :: {ne_binary(), api_binary()}.
 -type unique_channels() :: [unique_channel(),...] | [].

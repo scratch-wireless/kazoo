@@ -14,6 +14,7 @@
 -export([content_type_to_extension/1, extension_to_content_type/1]).
 -export([notify_email_list/3]).
 -export([filter_numbers/1]).
+-export([is_valid_caller_id/2]).
 
 -include("fax.hrl").
 
@@ -57,11 +58,17 @@ collect_channel_prop(Key, JObj) ->
 -spec content_type_to_extension(ne_binary() | string() | list()) -> ne_binary().
 content_type_to_extension(CT) when not is_binary(CT) ->
     content_type_to_extension(wh_util:to_binary(CT));
-content_type_to_extension(<<"application/pdf">>) -> <<"pdf">>;
-content_type_to_extension(<<"image/tiff">>) -> <<"tiff">>;
 content_type_to_extension(CT) when is_binary(CT) ->
-    lager:debug("content-type ~s not handled, returning 'tmp'",[CT]),
-    <<"tmp">>.
+    Cmd = binary_to_list(<<"echo -n `grep -E '^", CT/binary, "\\s' /etc/mime.types "
+                           "2> /dev/null "
+                           "| head -n1 "
+                           "| awk '{print $2}'`">>),
+    case os:cmd(Cmd) of
+        [] ->
+            lager:debug("content-type ~s not handled, returning 'tmp'",[CT]),
+            <<"tmp">>;
+        Ext -> wh_util:to_binary(Ext)
+    end.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -72,12 +79,19 @@ content_type_to_extension(CT) when is_binary(CT) ->
 -spec extension_to_content_type(ne_binary() | string() | list()) -> ne_binary().
 extension_to_content_type(Ext) when not is_binary(Ext) ->
     extension_to_content_type(wh_util:to_binary(Ext));
-extension_to_content_type(<<".pdf">>) -> <<"application/pdf">>;
-extension_to_content_type(<<".tif">>) -> <<"image/tiff">>;
-extension_to_content_type(<<".tiff">>) -> <<"image/tiff">>;
-extension_to_content_type(Ext) ->
-    lager:debug("extension ~s not handled, returning 'application/octet-stream'",[Ext]),
-    <<"application/octet-stream">>.
+extension_to_content_type(<<".", Ext/binary>>) ->
+    extension_to_content_type(Ext);
+extension_to_content_type(Ext) when is_binary(Ext) ->
+    Cmd = binary_to_list(<<"echo -n `grep -E '\\s", Ext/binary, "($|\\s)' /etc/mime.types "
+                           "2> /dev/null "
+                           "| head -n1 "
+                           "| cut -f1`">>),
+    case os:cmd(Cmd) of
+        "" ->
+            lager:debug("extension ~s not handled, returning 'application/octet-stream'",[Ext]),
+            <<"application/octet-stream">>;
+        CT -> CT
+    end.
 
 
 %%--------------------------------------------------------------------
@@ -132,13 +146,13 @@ save_fax_attachment(JObj, FileContents, CT) ->
     save_fax_attachment(JObj, FileContents, CT, whapps_config:get_integer(?CONFIG_CAT, <<"max_storage_retry">>, 5)).
 
 save_fax_attachment(JObj, _FileContents, _CT, 0) ->
-    DocId = wh_json:get_value(<<"_id">>, JObj),
-    Rev = wh_json:get_value(<<"_rev">>, JObj),
+    DocId = wh_doc:id(JObj),
+    Rev = wh_doc:revision(JObj),
     lager:debug("max retry saving attachment on fax id ~s rev ~s",[DocId, Rev]),
     {'error', <<"max retry saving attachment">>};
 save_fax_attachment(JObj, FileContents, CT, Count) ->
-    DocId = wh_json:get_value(<<"_id">>, JObj),
-    Rev = wh_json:get_value(<<"_rev">>, JObj),
+    DocId = wh_doc:id(JObj),
+    Rev = wh_doc:revision(JObj),
     Opts = [{'headers', [{'content_type', wh_util:to_list(CT)}]}
             ,{'rev', Rev}
            ],
@@ -173,7 +187,7 @@ check_fax_attachment(DocId, Name) ->
                                     {'ok', wh_json:object()} |
                                     {'error', any()}.
 save_fax_doc_completed(JObj)->
-    DocId = wh_json:get_value(<<"_id">>, JObj),
+    DocId = wh_doc:id(JObj),
     case couch_mgr:save_doc(?WH_FAXES_DB, wh_json:set_values([{<<"pvt_job_status">>, <<"pending">>}], JObj)) of
         {'ok', Doc} ->
             lager:debug("fax jobid ~s set to pending", [DocId]),
@@ -198,6 +212,14 @@ notify_email_list(From, OwnerEmail, List) ->
 -spec filter_numbers(binary()) -> binary().
 filter_numbers(Number) ->
     << <<X>> || <<X>> <= Number, is_digit(X)>>.
+
+-spec is_valid_caller_id(api_binary(), ne_binary()) -> boolean().
+is_valid_caller_id('undefined', _) -> 'false';
+is_valid_caller_id(Number, AccountId) ->
+    case wh_number_manager:lookup_account_by_number(Number) of
+        {'ok', AccountId, _} -> 'true';
+        _Else -> 'false'
+    end.
 
 -spec is_digit(integer()) -> boolean().
 is_digit(N) -> N >= $0 andalso N =< $9.

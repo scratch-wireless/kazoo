@@ -41,6 +41,8 @@
                    ,{'presence', [{'restrict_to', ['update'
                                                    ,'mwi_update'
                                                    ,'reset'
+                                                   ,'flush'
+                                                   ,'search_req'
                                                   ]}
                                   ,'federate'
                                  ]}
@@ -58,8 +60,14 @@
                      ,{{'omnip_subscriptions', 'handle_reset'}
                        ,[{<<"presence">>, <<"reset">>}]
                       }
+                     ,{{'omnip_subscriptions', 'handle_flush'}
+                       ,[{<<"presence">>, <<"flush">>}]
+                      }
                      ,{{'omnip_subscriptions', 'handle_kamailio_subscribe'}
                        ,[{<<"presence">>, <<"subscription">>}]
+                      }
+                     ,{{'omnip_subscriptions', 'handle_search_req'}
+                       ,[{<<"presence">>, <<"search_req">>}]
                       }
                     ]).
 -define(QUEUE_NAME, <<"omnip_shared_listener">>).
@@ -106,7 +114,7 @@ start_link() ->
 %% @end
 %%--------------------------------------------------------------------
 init([]) ->
-    put('callid', ?MODULE),
+    wh_util:put_callid(?MODULE),
     gen_listener:cast(self(), 'find_subscriptions_srv'),
     lager:debug("omnipresence_listener started"),
     {'ok', #state{}}.
@@ -180,7 +188,7 @@ handle_info({'DOWN', Ref, 'process', Pid, _R}, #state{subs_pid=Pid
                             ,subs_ref='undefined'
                            }};
 handle_info(?HOOK_EVT(_, EventName, JObj), State) ->
-    _ = spawn('omnip_subscriptions', 'handle_channel_event', [EventName, JObj]),
+    _ = wh_util:spawn('omnip_subscriptions', 'handle_channel_event', [EventName, JObj]),
     {'noreply', State};
 handle_info(_Info, State) ->
     lager:debug("unhandled msg: ~p", [_Info]),

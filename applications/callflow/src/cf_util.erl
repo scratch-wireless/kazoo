@@ -59,6 +59,7 @@
         ]).
 
 -export([wait_for_noop/2]).
+-export([start_task/3]).
 
 %%--------------------------------------------------------------------
 %% @public
@@ -179,21 +180,20 @@ notification_register(JObj, _Props) ->
 
 -spec mwi_query(wh_json:object()) -> 'ok'.
 mwi_query(JObj) ->
-    Username = wh_json:get_value(<<"Username">>, JObj),
     Realm = wh_json:get_value(<<"Realm">>, JObj),
     case whapps_util:get_account_by_realm(Realm) of
         {'ok', AccountDb} ->
             lager:debug("replying to mwi query"),
+            Username = wh_json:get_value(<<"Username">>, JObj),
             mwi_resp(Username, Realm, AccountDb, JObj);
         _Else -> 'ok'
     end.
 
--spec mwi_resp(api_binary(), api_binary(), ne_binary(), wh_json:object()) -> 'ok'.
+-spec mwi_resp(api_binary(), ne_binary(), ne_binary(), wh_json:object()) -> 'ok'.
 mwi_resp('undefined', _Realm, _AccountDb, _JObj) -> 'ok';
-mwi_resp(_Username, 'undefined', _AccountDb, _JObj) -> 'ok';
 mwi_resp(Username, Realm, AccountDb, JObj) ->
     case owner_ids_by_sip_username(AccountDb, Username) of
-        {'ok', [OwnerId]} ->
+        {'ok', [<<_/binary>> = OwnerId]} ->
             mwi_resp(Username, Realm, OwnerId, AccountDb, JObj);
         _Else -> 'ok'
     end.
@@ -308,20 +308,24 @@ send_mwi_update(New, Waiting, Username, Realm, JObj) ->
 %% @end
 %%--------------------------------------------------------------------
 -spec vm_count_by_owner(ne_binary(), api_binary()) -> {non_neg_integer(), non_neg_integer()}.
-vm_count_by_owner(_, 'undefined') -> {0, 0};
-vm_count_by_owner(AccountDb, OwnerId) ->
-    ViewOptions = [{'reduce', 'true'}
-                   ,{'group', 'true'}
+vm_count_by_owner(_AccountDb, 'undefined') -> {0, 0};
+vm_count_by_owner(<<_/binary>> = AccountDb, <<_/binary>> = OwnerId) ->
+    ViewOptions = ['reduce'
+                   ,'group'
                    ,{'group_level', 2}
                    ,{'startkey', [OwnerId]}
-                   ,{'endkey', [OwnerId, "\ufff0"]}
+                   ,{'endkey', [OwnerId, wh_json:new()]}
                   ],
     case couch_mgr:get_results(AccountDb, <<"cf_attributes/vm_count_by_owner">>, ViewOptions) of
         {'ok', MessageCounts} ->
-            Props = [{wh_json:get_value([<<"key">>, 2], MessageCount), wh_json:get_value(<<"value">>, MessageCount)}
+            Props = [{wh_json:get_value([<<"key">>, 2], MessageCount)
+                      ,wh_json:get_integer_value(<<"value">>, MessageCount)
+                     }
                      || MessageCount <- MessageCounts
                     ],
-            {props:get_value(<<"new">>, Props, 0), props:get_value(<<"saved">>, Props, 0)};
+            {props:get_integer_value(<<"new">>, Props, 0)
+             ,props:get_integer_value(<<"saved">>, Props, 0)
+            };
         {'error', _R} ->
             lager:info("unable to lookup vm counts by owner: ~p", [_R]),
             {0, 0}
@@ -416,7 +420,7 @@ get_owner_ids_by_sip_username(AccountDb, Username) ->
     ViewOptions = [{'key', Username}],
     case couch_mgr:get_results(AccountDb, <<"cf_attributes/sip_username">>, ViewOptions) of
         {'ok', [JObj]} ->
-            EndpointId = wh_json:get_value(<<"id">>, JObj),
+            EndpointId = wh_doc:id(JObj),
             OwnerIds = wh_json:get_value(<<"value">>, JObj, []),
             CacheProps = [{'origin', {'db', AccountDb, EndpointId}}],
             wh_cache:store_local(?CALLFLOW_CACHE, ?SIP_USER_OWNERS_KEY(AccountDb, Username), OwnerIds, CacheProps),
@@ -452,7 +456,7 @@ get_endpoint_id_by_sip_username(AccountDb, Username) ->
     ViewOptions = [{'key', Username}],
     case couch_mgr:get_results(AccountDb, <<"cf_attributes/sip_username">>, ViewOptions) of
         {'ok', [JObj]} ->
-            EndpointId = wh_json:get_value(<<"id">>, JObj),
+            EndpointId = wh_doc:id(JObj),
             CacheProps = [{'origin', {'db', AccountDb, EndpointId}}],
             wh_cache:store_local(?CALLFLOW_CACHE, ?SIP_ENDPOINT_ID_KEY(AccountDb, Username), EndpointId, CacheProps),
             {'ok', EndpointId};
@@ -628,7 +632,7 @@ is_digit(_) -> 'false'.
 %% @end
 %%-----------------------------------------------------------------------------
 -spec lookup_callflow_patterns(ne_binary(), ne_binary()) ->
-                                      {'ok', {wh_json:object(), ne_binary()}} |
+                                      {'ok', {wh_json:object(), api_binary()}} |
                                       {'error', term()}.
 lookup_callflow_patterns(Number, Db) ->
     lager:info("lookup callflow patterns for ~s in ~s", [Number, Db]),
@@ -659,7 +663,6 @@ test_callflow_patterns([Pattern|T], Number, {_, Capture}=Result) ->
     Regex = wh_json:get_value(<<"key">>, Pattern),
     case re:run(Number, Regex) of
         {'match', [{Start,End}]} ->
-            Match = binary:part(Number, Start, End),
             Flow = wh_json:get_value(<<"doc">>, Pattern),
             case binary:part(Number, Start, End) of
                 <<>> when Capture =:= <<>> ->
@@ -703,12 +706,10 @@ maybe_get_endpoint_hotdesk_owner(JObj) ->
         [OwnerId] -> OwnerId;
         [_|_] -> 'undefined'
     end.
+
 -spec maybe_get_endpoint_assigned_owner(wh_json:object()) -> api_binary().
 maybe_get_endpoint_assigned_owner(JObj) ->
-    case wh_json:get_ne_value(<<"owner_id">>, JObj) of
-        'undefined' -> 'undefined';
-        OwnerId -> OwnerId
-    end.
+    wh_json:get_ne_value(<<"owner_id">>, JObj).
 
 -spec apply_dialplan(ne_binary(), api_object()) -> ne_binary().
 apply_dialplan(N, 'undefined') -> N;
@@ -756,7 +757,7 @@ encryption_method_map(JObj, Endpoint) ->
 -spec maybe_start_metaflows(whapps_call:call(), wh_json:objects()) -> 'ok'.
 -spec maybe_start_metaflow(whapps_call:call(), wh_json:object()) -> 'ok'.
 maybe_start_metaflows(Call, Endpoints) ->
-    [maybe_start_metaflow(Call, Endpoint) || Endpoint <- Endpoints],
+    _ = [maybe_start_metaflow(Call, Endpoint) || Endpoint <- Endpoints],
     'ok'.
 
 maybe_start_metaflow(Call, Endpoint) ->
@@ -800,7 +801,7 @@ find_group_endpoints(GroupId, Call) ->
     GroupsJObj = cf_attributes:groups(Call),
     case [wh_json:get_value(<<"value">>, JObj)
           || JObj <- GroupsJObj,
-             wh_json:get_value(<<"id">>, JObj) =:= GroupId
+             wh_doc:id(JObj) =:= GroupId
          ]
     of
         [] -> [];
@@ -859,12 +860,18 @@ check_value_of_fields(Perms, Def, Data, Call) ->
 
 -spec sip_users_from_device_ids(ne_binaries(), whapps_call:call()) -> ne_binaries().
 sip_users_from_device_ids(EndpointIds, Call) ->
-    lists:foldl(fun(EndpointId, Acc) ->
-        case sip_user_from_device_id(EndpointId, Call) of
-            'undefined' -> Acc;
-            Username -> [Username|Acc]
-        end
-    end, [], EndpointIds).
+    lists:foldl(fun(EID, Acc) -> sip_users_from_device_id(EID, Acc, Call) end
+                ,[]
+                ,EndpointIds
+               ).
+
+-spec sip_users_from_device_id(ne_binary(), ne_binaries(), whapps_call:call()) ->
+                                      ne_binaries().
+sip_users_from_device_id(EndpointId, Acc, Call) ->
+    case sip_user_from_device_id(EndpointId, Call) of
+        'undefined' -> Acc;
+        Username -> [Username|Acc]
+    end.
 
 -spec sip_user_from_device_id(ne_binary(), whapps_call:call()) -> api_binary().
 sip_user_from_device_id(EndpointId, Call) ->
@@ -876,7 +883,7 @@ sip_user_from_device_id(EndpointId, Call) ->
 
 -spec wait_for_noop(whapps_call:call(), ne_binary()) ->
                            {'ok', whapps_call:call()} |
-                           {'error', 'channel_destroy' | wh_json:object()}.
+                           {'error', 'channel_hungup' | wh_json:object()}.
 wait_for_noop(Call, NoopId) ->
     case whapps_call_command:receive_event(?MILLISECONDS_IN_DAY) of
         {'ok', JObj} ->
@@ -893,7 +900,7 @@ process_event(Call, NoopId, JObj) ->
     case whapps_call_command:get_event_type(JObj) of
         {<<"call_event">>, <<"CHANNEL_DESTROY">>, _} ->
             lager:debug("channel was destroyed"),
-            {'error', 'channel_destroy'};
+            {'error', 'channel_hungup'};
         {<<"error">>, _, <<"noop">>} ->
             lager:debug("channel execution error while waiting for ~s: ~s", [NoopId, wh_json:encode(JObj)]),
             {'error', JObj};
@@ -908,22 +915,23 @@ process_event(Call, NoopId, JObj) ->
             wait_for_noop(Call, NoopId)
     end.
 
--define(DEFAULT_TIMEZONE, <<"America/Los_Angeles">>).
-
 -spec get_timezone(wh_json:object(), whapps_call:call()) -> ne_binary().
 get_timezone(JObj, Call) ->
     case wh_json:get_value(<<"timezone">>, JObj) of
-        'undefined' -> cf_util:account_timezone(Call);
+        'undefined' -> account_timezone(Call);
         TZ -> TZ
     end.
 
 -spec account_timezone(whapps_call:call()) -> ne_binary().
 account_timezone(Call) ->
-    case couch_mgr:open_cache_doc(whapps_call:account_db(Call)
-                                  ,whapps_call:account_id(Call)
-                                 )
-    of
-        {'ok', JObj} -> wh_json:get_value(<<"timezone">>, JObj, ?DEFAULT_TIMEZONE);
+    case kz_account:fetch(whapps_call:account_id(Call)) of
+        {'ok', AccountJObj} ->
+            kz_account:timezone(AccountJObj, ?DEFAULT_TIMEZONE);
         {'error', _E} ->
             whapps_config:get(<<"accounts">>, <<"timezone">>, ?DEFAULT_TIMEZONE)
     end.
+
+-spec start_task(fun(), list(), whapps_call:call()) -> 'ok'.
+start_task(Fun, Args, Call) ->
+    SpawnInfo = {'cf_task', [Fun, Args]},
+    cf_exe:add_event_listener(Call, SpawnInfo).

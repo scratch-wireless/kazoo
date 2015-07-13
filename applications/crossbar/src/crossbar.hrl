@@ -28,6 +28,8 @@
 
 -define(CROSSBAR_DEFAULT_CONTENT_TYPE, {<<"application">>, <<"json">>, []}).
 
+-define(CB_ACCOUNT_TOKEN_RESTRICTIONS, <<"token_restrictions">>).
+
 -define(CONTENT_PROVIDED, [{'to_json', ?JSON_CONTENT_TYPES}]).
 -define(CONTENT_ACCEPTED, [{'from_json', ?JSON_CONTENT_TYPES}
                            ,{'from_form', ?MULTIPART_CONTENT_TYPES}
@@ -43,12 +45,13 @@
                           ,?HTTP_OPTIONS
                          ]).
 
+-define(QUICKCALL_PATH_TOKEN, <<"quickcall">>).
 -define(DEVICES_QCALL_NOUNS(DeviceId, Number)
-        ,[{<<"devices">>, [DeviceId, <<"quickcall">>, Number]}
+        ,[{<<"devices">>, [DeviceId, ?QUICKCALL_PATH_TOKEN, Number]}
           ,{?WH_ACCOUNTS_DB, [_]}
          ]).
 -define(USERS_QCALL_NOUNS(UserId, Number)
-        ,[{<<"users">>, [UserId, <<"quickcall">>, Number]}
+        ,[{<<"users">>, [UserId, ?QUICKCALL_PATH_TOKEN , Number]}
           ,{?WH_ACCOUNTS_DB, [_]}
          ]).
 
@@ -72,12 +75,16 @@
                           ,'cb_schemas', 'cb_service_plans', 'cb_services'
                           ,'cb_simple_authz', 'cb_sms'
                           ,'cb_temporal_rules', 'cb_token_auth', 'cb_transactions'
+                          ,'cb_token_restrictions'
                           ,'cb_user_auth', 'cb_users'
                           ,'cb_vmboxes'
                           ,'cb_webhooks', 'cb_whitelabel'
                          ]).
 
--define(DEPRECATED_MODULES, ['cb_local_resources', 'cb_global_resources']).
+-define(DEPRECATED_MODULES, ['cb_local_resources'
+                             ,'cb_global_resources'
+                             ,'cb_signup'
+                            ]).
 
 -record(cb_context, {
            content_types_provided = [] :: crossbar_content_handlers()
@@ -125,6 +132,7 @@
           ,profile_id :: api_binary()
           ,api_version = ?VERSION_1 :: ne_binary()
           ,magic_pathed = 'false' :: boolean()
+          ,should_paginate :: api_boolean()
          }).
 
 -define(CROSSBAR_HRL, 'true').

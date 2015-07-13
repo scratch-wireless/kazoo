@@ -32,7 +32,7 @@
         ]).
 -export([get_account_name/1]).
 -export([find_oldest_doc/1]).
--export([get_event_type/1, put_callid/1]).
+-export([get_event_type/1]).
 -export([get_call_termination_reason/1]).
 -export([get_view_json/1, get_view_json/2]).
 -export([get_views_json/2]).
@@ -74,7 +74,7 @@
 -spec update_all_accounts(ne_binary()) -> 'ok'.
 update_all_accounts(File) ->
     lists:foreach(fun(AccountDb) ->
-                          timer:sleep(2000),
+                          timer:sleep(2 * ?MILLISECONDS_IN_SECOND),
                           couch_mgr:revise_doc_from_file(AccountDb, 'crossbar', File)
                   end, get_all_accounts(?REPLICATE_ENCODING)).
 
@@ -88,7 +88,7 @@ update_all_accounts(File) ->
 -spec revise_whapp_views_in_accounts(atom()) -> 'ok'.
 revise_whapp_views_in_accounts(App) ->
     lists:foreach(fun(AccountDb) ->
-                          timer:sleep(2000),
+                          timer:sleep(2 * ?MILLISECONDS_IN_SECOND),
                           couch_mgr:revise_views_from_folder(AccountDb, App)
                   end, get_all_accounts(?REPLICATE_ENCODING)).
 
@@ -102,7 +102,7 @@ revise_whapp_views_in_accounts(App) ->
 -spec replicate_from_accounts(ne_binary(), ne_binary()) -> 'ok'.
 replicate_from_accounts(TargetDb, FilterDoc) when is_binary(FilterDoc) ->
     lists:foreach(fun(AccountDb) ->
-                          timer:sleep(2000),
+                          timer:sleep(2 * ?MILLISECONDS_IN_SECOND),
                           replicate_from_account(AccountDb, TargetDb, FilterDoc)
                   end, get_all_accounts(?REPLICATE_ENCODING)).
 
@@ -177,11 +177,9 @@ get_master_account_db() ->
 %%--------------------------------------------------------------------
 -spec get_account_name(ne_binary()) -> ne_binary().
 get_account_name(Account) ->
-    AccountId = wh_util:format_account_id(Account, 'raw'),
-    AccountDb = wh_util:format_account_id(Account, 'encoded'),
-    case couch_mgr:open_cache_doc(AccountDb, AccountId) of
+    case kz_account:fetch(Account) of
         {'error', _} -> 'undefined';
-        {'ok', JObj} -> wh_json:get_ne_value(<<"name">>, JObj)
+        {'ok', JObj} -> kz_account:name(JObj)
     end.
 
 %%--------------------------------------------------------------------
@@ -197,15 +195,13 @@ find_oldest_doc([]) -> {'error', 'no_docs'};
 find_oldest_doc([First|Docs]) ->
     {_, OldestDocID} =
         lists:foldl(fun(Doc, {Created, _}=Eldest) ->
-                            Older = wh_json:get_integer_value(<<"pvt_created">>, Doc),
+                            Older = wh_doc:created(Doc),
                             case Older < Created  of
-                                'true' -> {Older, wh_json:get_value(<<"_id">>, Doc)};
+                                'true' -> {Older, wh_doc:id(Doc)};
                                 'false' -> Eldest
                             end
                     end
-                    ,{wh_json:get_integer_value(<<"pvt_created">>, First)
-                      ,wh_json:get_value(<<"_id">>, First)
-                     }
+                    ,{wh_doc:created(First), wh_doc:id(First)}
                     ,Docs),
     {'ok', OldestDocID}.
 
@@ -226,7 +222,7 @@ get_all_accounts(Encoding) ->
                                                       ]),
     [wh_util:format_account_id(Id, Encoding)
      || Db <- Dbs,
-        is_account_db((Id = wh_json:get_value(<<"id">>, Db)))
+        is_account_db((Id = wh_doc:id(Db)))
     ].
 
 -spec get_all_accounts_and_mods() -> ne_binaries().
@@ -277,30 +273,20 @@ is_account_mod(Db) -> couch_util:db_classification(Db) =:= 'modb'.
 -spec is_account_db(ne_binary()) -> boolean().
 is_account_db(Db) -> couch_util:db_classification(Db) =:= 'account'.
 
+
+-type getby_return() :: {'ok', ne_binary()} |
+                        {'multiples', ne_binaries()} |
+                        {'error', 'not_found'}.
+
 %%--------------------------------------------------------------------
 %% @public
 %% @doc Realms are one->one with accounts.
 %% @end
 %%--------------------------------------------------------------------
--spec get_account_by_realm(ne_binary()) ->
-                                  {'ok', wh_json:key()} |
-                                  {'multiples', wh_json:key()} |
-                                  {'error', 'not_found'}.
+-spec get_account_by_realm(ne_binary()) -> getby_return().
 get_account_by_realm(RawRealm) ->
     Realm = wh_util:to_lower_binary(RawRealm),
-    case couch_mgr:get_results(?WH_ACCOUNTS_DB, ?AGG_LIST_BY_REALM, [{'key', Realm}]) of
-        {'ok', [JObj]} ->
-            AccountDb = wh_json:get_value([<<"value">>, <<"account_db">>], JObj),
-            {'ok', AccountDb};
-        {'ok', []} ->
-            {'error', 'not_found'};
-        {'ok', [_|_]=JObjs} ->
-            AccountDbs = [wh_json:get_value([<<"value">>, <<"account_db">>], JObj) || JObj <- JObjs],
-            {'multiples', AccountDbs};
-        _E ->
-            lager:debug("error while fetching accounts by realm: ~p", [_E]),
-            {'error', 'not_found'}
-    end.
+    get_accounts_by(Realm, ?ACCT_BY_REALM_CACHE(Realm), ?AGG_LIST_BY_REALM).
 
 %%--------------------------------------------------------------------
 %% @public
@@ -308,23 +294,44 @@ get_account_by_realm(RawRealm) ->
 %% unique.
 %% @end
 %%--------------------------------------------------------------------
--spec get_accounts_by_name(ne_binary()) ->
-                                  {'ok', ne_binary()} |
-                                  {'multiples', ne_binaries()} |
-                                  {'error', 'not_found'}.
+-spec get_accounts_by_name(ne_binary()) -> getby_return().
 get_accounts_by_name(Name) ->
-    case couch_mgr:get_results(?WH_ACCOUNTS_DB, ?AGG_LIST_BY_NAME, [{'key', Name}]) of
+    get_accounts_by(Name, ?ACCT_BY_NAME_CACHE(Name), ?AGG_LIST_BY_NAME).
+
+-spec get_accounts_by(ne_binary(), tuple(), ne_binary()) -> getby_return().
+get_accounts_by(What, CacheKey, View) ->
+    case wh_cache:peek_local(?WHAPPS_GETBY_CACHE, CacheKey) of
+        {'ok', [AccountDb]} -> {'ok', AccountDb};
+        {'ok', [_|_]=AccountDbs} -> {'multiples', AccountDbs};
+        {'error', 'not_found'} ->
+            do_get_accounts_by(What, CacheKey, View)
+    end.
+
+-spec do_get_accounts_by(ne_binary(), tuple(), ne_binary()) -> getby_return().
+do_get_accounts_by(What, CacheKey, View) ->
+    ViewOptions = [{'key', What}],
+    case couch_mgr:get_results(?WH_ACCOUNTS_DB, View, ViewOptions) of
         {'ok', [JObj]} ->
             AccountDb = wh_json:get_value([<<"value">>, <<"account_db">>], JObj),
+            _ = cache(CacheKey, [AccountDb]),
             {'ok', AccountDb};
-        {'ok', []} -> {'error', 'not_found'};
         {'ok', [_|_]=JObjs} ->
             AccountDbs = [wh_json:get_value([<<"value">>, <<"account_db">>], JObj) || JObj <- JObjs],
+            _ = cache(CacheKey, AccountDbs),
             {'multiples', AccountDbs};
+        {'ok', []} ->
+            {'error', 'not_found'};
         _E ->
-            lager:debug("error while fetching accounts by name: ~p", [_E]),
+            lager:debug("error while fetching ~s: ~p", [View, _E]),
             {'error', 'not_found'}
     end.
+
+-spec cache(tuple(), ne_binaries()) -> 'ok'.
+cache(Key, AccountDbs) ->
+    CacheProps = [{'origin', [ {'db', AccountDb, wh_util:format_account_id(AccountDb, 'raw')}
+                               || AccountDb <- AccountDbs
+                             ]}],
+    wh_cache:store_local(?WHAPPS_GETBY_CACHE, Key, AccountDbs, CacheProps).
 
 %%--------------------------------------------------------------------
 %% @public
@@ -335,16 +342,6 @@ get_accounts_by_name(Name) ->
 %%--------------------------------------------------------------------
 -spec get_event_type(wh_json:object()) -> {ne_binary(), ne_binary()}.
 get_event_type(JObj) -> wh_util:get_event_type(JObj).
-
-%%--------------------------------------------------------------------
-%% @public
-%% @doc
-%% Given an JSON Object extracts the Call-ID into the processes
-%% dictionary, failing that the Msg-ID and finally a generic
-%% @end
-%%--------------------------------------------------------------------
--spec put_callid(wh_json:object()) -> api_binary().
-put_callid(JObj) -> wh_util:put_callid(JObj).
 
 %%--------------------------------------------------------------------
 %% @public
@@ -398,7 +395,7 @@ get_view_json(Path) ->
     lager:debug("fetch view from ~s", [Path]),
     {'ok', Bin} = file:read_file(Path),
     JObj = wh_json:decode(Bin),
-    {wh_json:get_value(<<"_id">>, JObj), JObj}.
+    {wh_doc:id(JObj), JObj}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -426,9 +423,9 @@ update_views([], Db, [{Id,View}|Views], Remove) ->
     _ = couch_mgr:ensure_saved(Db, View),
     update_views([], Db, Views, Remove);
 update_views([Found|Finds], Db, Views, Remove) ->
-    Id = wh_json:get_value(<<"id">>, Found),
+    Id = wh_doc:id(Found),
     Doc = wh_json:get_value(<<"doc">>, Found),
-    RawDoc = wh_json:delete_key(<<"_rev">>, Doc),
+    RawDoc = wh_doc:delete_revision(Doc),
     case props:get_value(Id, Views) of
         'undefined' when Remove ->
             lager:debug("removing view '~s' from '~s'", [Id, Db]),
@@ -441,8 +438,8 @@ update_views([Found|Finds], Db, Views, Remove) ->
             update_views(Finds, Db, props:delete(Id, Views), Remove);
         View2 ->
             lager:debug("updating view '~s' in '~s'", [Id, Db]),
-            Rev = wh_json:get_value(<<"_rev">>, Doc),
-            _ = couch_mgr:ensure_saved(Db, wh_json:set_value(<<"_rev">>, Rev, View2)),
+            Rev = wh_doc:revision(Doc),
+            _ = couch_mgr:ensure_saved(Db, wh_doc:set_revision(View2, Rev)),
             update_views(Finds, Db, props:delete(Id, Views), Remove)
     end.
 
@@ -455,14 +452,14 @@ update_views([Found|Finds], Db, Views, Remove) ->
 -spec add_aggregate_device(ne_binary(), api_binary()) -> 'ok'.
 add_aggregate_device(_, 'undefined') -> 'ok';
 add_aggregate_device(Db, Device) ->
-    DeviceId = wh_json:get_value(<<"_id">>, Device),
+    DeviceId = wh_doc:id(Device),
     _ = case couch_mgr:lookup_doc_rev(?WH_SIP_DB, DeviceId) of
             {'ok', Rev} ->
                 lager:debug("aggregating device ~s/~s", [Db, DeviceId]),
-                couch_mgr:ensure_saved(?WH_SIP_DB, wh_json:set_value(<<"_rev">>, Rev, Device));
+                couch_mgr:ensure_saved(?WH_SIP_DB, wh_doc:set_revision(Device, Rev));
             {'error', 'not_found'} ->
                 lager:debug("aggregating device ~s/~s", [Db, DeviceId]),
-                couch_mgr:ensure_saved(?WH_SIP_DB, wh_json:delete_key(<<"_rev">>, Device))
+                couch_mgr:ensure_saved(?WH_SIP_DB, wh_doc:delete_revision(Device))
         end,
     'ok'.
 
@@ -483,7 +480,7 @@ rm_aggregate_device(Db, DeviceId) when is_binary(DeviceId) ->
             'ok'
     end;
 rm_aggregate_device(Db, Device) ->
-    rm_aggregate_device(Db, wh_json:get_value(<<"_id">>, Device)).
+    rm_aggregate_device(Db, wh_doc:id(Device)).
 
 -spec amqp_pool_send(api_terms(), wh_amqp_worker:publish_fun()) ->
                             'ok' | {'error', any()}.

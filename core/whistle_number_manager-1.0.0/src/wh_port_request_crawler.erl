@@ -67,7 +67,7 @@ cleanup_timer() ->
 %% @end
 %%--------------------------------------------------------------------
 init([]) ->
-    put('callid', ?MODULE),
+    wh_util:put_callid(?MODULE),
     lager:debug("started ~s", [?MODULE]),
     {'ok', #state{cleanup_ref=cleanup_timer()}}.
 
@@ -116,7 +116,7 @@ handle_cast(_Msg, State) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_info({'timeout', Ref, _Msg}, #state{cleanup_ref=Ref}=State) ->
-    _P = spawn('wh_port_request', 'send_submitted_requests', []),
+    _P = wh_util:spawn('wh_port_request', 'send_submitted_requests', []),
     {'noreply', State#state{cleanup_ref=cleanup_timer()}};
 handle_info(_Msg, State) ->
     lager:debug("unhandled msg: ~p", [_Msg]),

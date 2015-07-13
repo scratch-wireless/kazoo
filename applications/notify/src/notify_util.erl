@@ -59,7 +59,7 @@ send_email(From, To, Email) ->
                            ,{'auth', Auth}
                           ]
                          ,fun(X) ->
-                                  put('callid', ReqId),
+                                  wh_util:put_callid(ReqId),
                                   lager:debug("email relay responded: ~p, send to ~p", [X, Self]),
                                   Self ! {'relay_response', X}
                           end),
@@ -69,7 +69,7 @@ send_email(From, To, Email) ->
         {'relay_response', {'ok', _Msg}} -> 'ok';
         {'relay_response', {'error', _Type, Message}} -> {'error', Message};
         {'relay_response', {'exit', Reason}} -> {'error', Reason}
-    after 10000 -> {'error', 'timeout'}
+    after 10 * ?MILLISECONDS_IN_SECOND -> {'error', 'timeout'}
     end.
 
 -spec send_update(api_binary(), ne_binary(), ne_binary()) -> 'ok'.
@@ -171,8 +171,8 @@ get_default_template(Category, Key) ->
 %% @end
 %%--------------------------------------------------------------------
 -spec render_template(api_binary(), atom(), wh_proplist()) ->
-                                   {'ok', iolist()} |
-                                   {'error', term()}.
+                                   {'ok', string()} |
+                                   {'error', _}.
 render_template(Template, DefaultTemplate, Props) ->
     case do_render_template(Template, DefaultTemplate, Props) of
         {'ok', R} -> {'ok', binary_to_list(iolist_to_binary(R))};
@@ -180,13 +180,14 @@ render_template(Template, DefaultTemplate, Props) ->
     end.
 
 -spec do_render_template(api_binary(), atom(), wh_proplist()) ->
-                                   {'ok', iolist()} |
-                                   {'error', term()}.
+                                   {'ok', string()} |
+                                   {'error', _}.
 do_render_template('undefined', DefaultTemplate, Props) ->
     lager:debug("rendering default ~s template", [DefaultTemplate]),
     DefaultTemplate:render(Props);
 do_render_template(Template, DefaultTemplate, Props) ->
     try
+        'false' = wh_util:is_empty(Template),
         CustomTemplate = wh_util:to_atom(list_to_binary([couch_mgr:get_uuid(), "_"
                                                         ,wh_util:to_binary(DefaultTemplate)
                                                         ])
@@ -258,7 +259,7 @@ find_notification_settings([_, Module], Tree) ->
         {'error', _} -> wh_json:new();
         {'ok', JObj} ->
             lager:debug("looking for notifications '~s' service info in: ~s"
-                        ,[Module, wh_json:get_value(<<"_id">>, JObj)]),
+                        ,[Module, wh_doc:id(JObj)]),
             case wh_json:get_ne_value([<<"notifications">>, Module], JObj) of
                 'undefined' -> maybe_find_deprecated_settings(Module, JObj);
                 Settings -> Settings
@@ -289,33 +290,24 @@ maybe_find_deprecated_settings(_, _) -> wh_json:new().
 %%--------------------------------------------------------------------
 -spec get_rep_email(wh_json:object()) -> api_binary().
 get_rep_email(JObj) ->
-    AccountId = wh_json:get_value(<<"pvt_account_id">>, JObj),
-    case kz_account:tree(JObj) of
-        [] -> 'undefined';
-        Tree -> get_rep_email(lists:reverse(Tree), AccountId)
+    case whapps_config:get_is_true(?NOTIFY_CONFIG_CAT, <<"search_rep_email">>, 'true') of
+        'true' -> find_rep_email(JObj);
+        'false' -> 'undefined'
     end.
 
-get_rep_email([], _) -> 'undefined';
-get_rep_email([Parent|Parents], AccountId) ->
-    ParentDb = wh_util:format_account_id(Parent, 'encoded'),
-    ViewOptions = ['include_docs'
-                   ,{'key', AccountId}
-                  ],
-    lager:debug("attempting to find sub account rep for ~s in parent account ~s", [AccountId, Parent]),
-    case couch_mgr:get_results(ParentDb, <<"sub_account_reps/find_assignments">>, ViewOptions) of
-        {'ok', [Result|_]} ->
-            case wh_json:get_value([<<"doc">>, <<"email">>], Result) of
-                'undefined' ->
-                    lager:debug("found rep but they have no email, attempting to get email of admin"),
-                    wh_json:get_value(<<"email">>, find_admin(ParentDb));
-                Else ->
-                    lager:debug("found rep but email: ~s", [Else]),
-                    Else
-            end;
-        _E ->
-            lager:debug("failed to find rep for sub account, attempting next parent"),
-            get_rep_email(Parents, Parents)
-    end.
+-spec find_rep_email(wh_json:object()) -> api_binary().
+find_rep_email(JObj) ->
+    AccountId = wh_doc:account_id(JObj),
+    Admin =
+        case wh_services:is_reseller(AccountId) of
+            'true' ->
+                lager:debug("finding admins for reseller account ~s", [AccountId]),
+                find_admin(AccountId);
+            'false' ->
+                lager:debug("finding admins for reseller of account ~s", [AccountId]),
+                find_admin(wh_services:find_reseller_id(AccountId))
+        end,
+    kzd_user:email(Admin).
 
 %%--------------------------------------------------------------------
 %% @public
@@ -329,13 +321,10 @@ get_rep_email([Parent|Parents], AccountId) ->
 find_admin('undefined') -> wh_json:new();
 find_admin([]) -> wh_json:new();
 find_admin(Account) when is_binary(Account) ->
-    AccountDb = wh_util:format_account_id(Account, 'encoded'),
     AccountId = wh_util:format_account_id(Account, 'raw'),
-    case couch_mgr:open_cache_doc(AccountDb, AccountId) of
+    case kz_account:fetch(Account) of
         {'error', _} -> find_admin([AccountId]);
-        {'ok', JObj} ->
-            Tree = kz_account:tree(JObj),
-            find_admin([AccountId | lists:reverse(Tree)])
+        {'ok', JObj} -> find_admin([AccountId | lists:reverse(kz_account:tree(JObj))])
     end;
 find_admin([AcctId|Tree]) ->
     AccountDb = wh_util:format_account_id(AcctId, 'encoded'),
@@ -345,9 +334,9 @@ find_admin([AcctId|Tree]) ->
     case couch_mgr:get_results(AccountDb, <<"maintenance/listing_by_type">>, ViewOptions) of
         {'ok', Users} ->
             case [User
-                  || User <- Users
-                         ,wh_json:get_value([<<"doc">>, <<"priv_level">>], User) =:= <<"admin">>
-                         ,wh_json:get_ne_value([<<"doc">>, <<"email">>], User) =/= 'undefined'
+                  || User <- Users,
+                     wh_json:get_value([<<"doc">>, <<"priv_level">>], User) =:= <<"admin">>,
+                     wh_json:get_ne_value([<<"doc">>, <<"email">>], User) =/= 'undefined'
                  ]
             of
                 [] -> find_admin(Tree);
@@ -358,8 +347,8 @@ find_admin([AcctId|Tree]) ->
             find_admin(Tree)
     end;
 find_admin(Account) ->
-    find_admin([ wh_json:get_value(<<"pvt_account_id">>, Account)
-                 | lists:reverse(kz_account:tree(Account))
+    find_admin([wh_doc:account_id(Account)
+                | lists:reverse(kz_account:tree(Account))
                ]).
 
 %%--------------------------------------------------------------------
@@ -370,17 +359,15 @@ find_admin(Account) ->
 %%--------------------------------------------------------------------
 -spec get_account_doc(wh_json:object()) ->
                              {'ok', wh_json:object()} |
-                             {'error', term()} |
+                             {'error', _} |
                              'undefined'.
 get_account_doc(JObj) ->
-    case {wh_json:get_value(<<"Account-DB">>, JObj), wh_json:get_value(<<"Account-ID">>, JObj)} of
-        {'undefined', 'undefined'} -> 'undefined';
-        {'undefined', Id} ->
-            couch_mgr:open_cache_doc(wh_util:format_account_id(Id, 'encoded'), Id);
-        {Db, 'undefined'} ->
-            couch_mgr:open_cache_doc(Db, wh_util:format_account_id(Db, 'raw'));
-        {Db, AccountId} ->
-            couch_mgr:open_cache_doc(Db, AccountId)
+    case wh_json:get_first_defined([<<"Account-DB">>
+                                    ,<<"Account-ID">>
+                                   ], JObj)
+    of
+        'undefined' -> 'undefined';
+        Account -> kz_account:fetch(Account)
     end.
 
 -spec category_to_file(ne_binary()) -> iolist() | 'undefined'.
@@ -447,7 +434,7 @@ qr_code_image(Text) ->
             'undefined'
     end.
 
--spec get_charset_params(term()) -> tuple().
+-spec get_charset_params(proplist()) -> {proplist(), binary()}.
 get_charset_params(Service) ->
         case props:get_value(<<"template_charset">>, Service) of
             <<>> -> {[], <<>>};

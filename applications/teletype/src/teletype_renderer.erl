@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%%% @copyright (C) 2014, 2600Hz
+%%% @copyright (C) 2014-2015, 2600Hz
 %%% @doc
 %%%
 %%% @end
@@ -46,12 +46,20 @@ render(TemplateId, Template, TemplateData) ->
     end.
 
 -spec next_renderer() -> pid().
+-spec next_renderer(pos_integer()) -> pid().
 next_renderer() ->
-    try poolboy:checkout(teletype_sup:render_farm_name(), 'false', 2000) of
+    next_renderer(?MILLISECONDS_IN_SECOND).
+
+next_renderer(BackoffMs) ->
+    try poolboy:checkout(teletype_sup:render_farm_name()
+                         ,'false'
+                         ,2 * ?MILLISECONDS_IN_SECOND
+                        )
+    of
         'full' ->
-            lager:critical("render farm pool is full!"),
-            timer:sleep(1000),
-            next_renderer();
+            lager:critical("render farm pool is full! waiting ~bms", [BackoffMs]),
+            timer:sleep(BackoffMs),
+            next_renderer(BackoffMs * 2);
         P -> P
     catch
         _E:_R ->
@@ -179,7 +187,7 @@ log_warnings(Ws) ->
 
 log_error_infos([]) -> 'ok';
 log_error_infos([{_File, Info}|Infos]) ->
-    [log_error_info(EI) || EI <- Info],
+    _ = [log_error_info(EI) || EI <- Info],
     log_error_infos(Infos).
 
 log_error_info({Location, _Module, Desc}) ->

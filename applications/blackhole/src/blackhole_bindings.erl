@@ -151,7 +151,7 @@ unbind(Bindings, Module, Fun) ->
 
 -spec unbind(ne_binary() | ne_binaries(), atom(), atom(), term()) -> 'ok'.
 unbind([_|_]=Bindings, Module, Fun, Payload) ->
-    [unbind(Binding, Module, Fun, Payload) || Binding <- Bindings],
+    _ = [unbind(Binding, Module, Fun, Payload) || Binding <- Bindings],
     'ok';
 unbind(Binding, Module, Fun, Payload) when is_binary(Binding) ->
     kazoo_bindings:unbind(Binding, Module, Fun, Payload).
@@ -174,7 +174,7 @@ modules_loaded() -> kazoo_bindings:modules_loaded().
 -spec init() -> 'ok'.
 init() ->
     lager:debug("initializing blackhole bindings"),
-    put('callid', ?LOG_SYSTEM_ID),
+    wh_util:put_callid(?LOG_SYSTEM_ID),
     _ = [init_mod(Mod)
          || Mod <- whapps_config:get(?BLACKHOLE_CONFIG_CAT, <<"autoload_modules">>, ?DEFAULT_MODULES)
         ],

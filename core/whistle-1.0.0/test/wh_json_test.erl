@@ -9,13 +9,17 @@
 %%%-------------------------------------------------------------------
 -module(wh_json_test).
 
--include_lib("proper/include/proper.hrl").
+-ifdef(PROPER).
+- include_lib("proper/include/proper.hrl").
+-endif.
 -include_lib("eunit/include/eunit.hrl").
 
 -include_lib("whistle/src/wh_json.hrl").
 
 
 %% PropEr Testing
+-ifdef(PROPER).
+
 prop_is_object() ->
     ?FORALL(JObj
             ,wh_json:object()
@@ -65,12 +69,20 @@ prop_to_proplist() ->
                 end)
            ).
 
+-endif.
+
 -define(D1, ?JSON_WRAPPER([{<<"d1k1">>, <<"d1v1">>}
                            ,{<<"d1k2">>, 'd1v2'}
                            ,{<<"d1k3">>, [<<"d1v3.1">>, <<"d1v3.2">>, <<"d1v3.3">>]}
                           ])).
--define(D2, ?JSON_WRAPPER([{<<"d2k1">>, 1}, {<<"d2k2">>, 3.14}, {<<"sub_d1">>, ?D1}])).
--define(D3, ?JSON_WRAPPER([{<<"d3k1">>, <<"d3v1">>}, {<<"d3k2">>, []}, {<<"sub_docs">>, [?D1, ?D2]}])).
+-define(D2, ?JSON_WRAPPER([{<<"d2k1">>, 1}
+                           ,{<<"d2k2">>, 3.14}
+                           ,{<<"sub_d1">>, ?D1}
+                          ])).
+-define(D3, ?JSON_WRAPPER([{<<"d3k1">>, <<"d3v1">>}
+                           ,{<<"d3k2">>, []}
+                           ,{<<"sub_docs">>, [?D1, ?D2]}
+                          ])).
 -define(D4, [?D1, ?D2, ?D3]).
 
 -define(D6, ?JSON_WRAPPER([{<<"d2k1">>, 1}
@@ -80,9 +92,22 @@ prop_to_proplist() ->
                          )).
 -define(D7, ?JSON_WRAPPER([{<<"d1k1">>, <<"d1v1">>}])).
 
+-define(SP, wh_json:decode(<<"{\"plan\":{\"phone_numbers\":{\"did_us\":{\"discounts\":{\"cumulative\":{\"rate\":1}}}}}}">>)).
+-define(O, wh_json:decode(<<"{\"phone_numbers\":{\"did_us\":{\"discounts\":{\"cumulative\":{\"rate\":20}}}}}">>)).
+
+merge_overrides_test() ->
+    AP = wh_json:merge_recursive(?SP, wh_json:from_list([{<<"plan">>, ?O}])),
+
+    Key = [<<"plan">>, <<"phone_numbers">>, <<"did_us">>, <<"discounts">>, <<"cumulative">>, <<"rate">>],
+
+    ?assertEqual(1, wh_json:get_value(Key, ?SP)),
+    ?assertEqual(20, wh_json:get_value(Key, AP)).
+
+-ifdef(PROPER).
 is_json_object_proper_test_() ->
     {"Runs wh_json PropEr tests for is_json_object/1",
      {'timeout', 10000, [?_assertEqual([], proper:module(?MODULE))]}}.
+-endif.
 
 is_empty_test() ->
     ?assertEqual('true', wh_json:is_empty(wh_json:new())),
@@ -100,18 +125,24 @@ merge_jobjs_test() ->
     ?assertEqual('true', 'undefined' =:= wh_json:get_value(<<"missing_k">>, JObj)).
 
 merge_recursive_test() ->
-    JObj = wh_json:merge_recursive(?D1, wh_json:set_value(<<"d1k2">>, 'd2k2', ?D2)),
-    ?assertEqual('true', wh_json:is_json_object(JObj)),
-    ?assertEqual('true', 'undefined' =/= wh_json:get_value(<<"d1k1">>, JObj)),
-    ?assertEqual('true', 'undefined' =/= wh_json:get_value(<<"d2k1">>, JObj)),
+    Base = ?D2,
+    New = wh_json:set_value([<<"sub_d1">>, <<"d1k1">>], 'd2k2', ?D2),
+    JObj = wh_json:merge_recursive(Base, New),
+    JObj1 = wh_json:merge_recursive([Base, New]),
 
-    ?assertEqual('true', 'undefined' =/= wh_json:get_value([<<"d1k3">>, 2], JObj)),
+    lists:foreach(fun(J) ->
+                          ?assertEqual('true', wh_json:is_json_object(J)),
+                          ?assertEqual('undefined', wh_json:get_value(<<"d1k1">>, J)),
+                          ?assertEqual(1, wh_json:get_value(<<"d2k1">>, J)),
 
-    ?assertEqual('true', 'undefined' =/= wh_json:get_value(<<"sub_d1">>, JObj)),
+                          ?assertEqual('true', 'undefined' =/= wh_json:get_value(<<"sub_d1">>, J)),
 
-    ?assertEqual('true', 'undefined' =/= wh_json:get_value([<<"sub_d1">>, <<"d1k1">>], JObj)),
-    ?assertEqual('true', 'd2k2' =:= wh_json:get_value(<<"d1k2">>, JObj)), %% second JObj takes precedence
-    ?assertEqual('true', 'undefined' =:= wh_json:get_value(<<"missing_k">>, JObj)).
+                          %% second JObj takes precedence
+                          ?assertEqual('d2k2',  wh_json:get_value([<<"sub_d1">>, <<"d1k1">>], J)),
+                          ?assertEqual('undefined', wh_json:get_value(<<"missing_k">>, J))
+                  end
+                  ,[JObj, JObj1]
+                 ).
 
 get_binary_value_test() ->
     ?assertEqual('true', is_binary(wh_json:get_binary_value(<<"d1k1">>, ?D1))),

@@ -89,7 +89,7 @@ rm_listener(Srv, Pid, Doc) ->
 %%--------------------------------------------------------------------
 -spec init(list()) -> {'ok', state()}.
 init([DbName]) ->
-    _ = put('callid', list_to_binary([<<"changes_">>, DbName])),
+    _ = wh_util:put_callid(list_to_binary([<<"changes_">>, DbName])),
     lager:debug("starting change handler for ~s", [DbName]),
     {'ok', #state{db=DbName}}.
 
@@ -182,7 +182,7 @@ handle_change(_JObj, #state{listeners=[]}=State) ->
 handle_change({done, _}, State) ->
     {noreply, State};
 handle_change(JObj, #state{listeners=Ls}=State) ->
-    spawn(?MODULE, alert_listeners, [JObj, Ls]),
+    _ = wh_util:spawn(?MODULE, alert_listeners, [JObj, Ls]),
     {noreply, State, hibernate}.
 
 %%--------------------------------------------------------------------
@@ -231,7 +231,7 @@ keep_listener(_, _, _) -> 'true'.
 
 -spec alert_listeners(wh_json:object(), listeners()) -> 'ok'.
 alert_listeners(JObj, Ls) ->
-    DocID = wh_json:get_value(<<"id">>, JObj),
+    DocID = wh_doc:id(JObj),
     Msg = case wh_json:is_true(<<"deleted">>, JObj, 'false') of
               'false' ->
                   {'document_changes', DocID, [wh_json:to_proplist(C)

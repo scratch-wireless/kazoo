@@ -164,7 +164,7 @@ bind(Binding, Module, Fun) when is_binary(Binding) ->
 
 -spec flush() -> 'ok'.
 flush() ->
-    [kazoo_bindings:flush_mod(Mod) || Mod <- modules_loaded()],
+    _ = [kazoo_bindings:flush_mod(Mod) || Mod <- modules_loaded()],
     'ok'.
 
 -spec flush(ne_binary()) -> 'ok'.
@@ -190,7 +190,7 @@ is_cb_module(Mod) -> is_cb_module(wh_util:to_binary(Mod)).
 init() ->
     lager:debug("initializing bindings"),
 
-    put('callid', ?LOG_SYSTEM_ID),
+    wh_util:put_callid(?LOG_SYSTEM_ID),
     _ = [maybe_init_mod(Mod)
          || Mod <- crossbar_config:autoload_modules(?DEFAULT_MODULES)
     ],

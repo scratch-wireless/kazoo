@@ -36,7 +36,7 @@
 
 -include("ts.hrl").
 
--define(WAIT_FOR_WIN_TIMEOUT, 5000). %% 5 seconds
+-define(WAIT_FOR_WIN_TIMEOUT, 5 * ?MILLISECONDS_IN_SECOND). %% 5 seconds
 
 -type state() :: #ts_callflow_state{}.
 
@@ -46,7 +46,7 @@
                   state() | {'error', 'not_ts_account'}.
 init(RouteReqJObj, Type) ->
     CallID = wh_json:get_value(<<"Call-ID">>, RouteReqJObj),
-    put('callid', CallID),
+    wh_util:put_callid(CallID),
     case is_trunkstore_acct(RouteReqJObj, Type) of
         'false' ->
             lager:info("request is not for a trunkstore account"),

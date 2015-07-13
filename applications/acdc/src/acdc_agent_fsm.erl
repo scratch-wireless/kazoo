@@ -23,6 +23,8 @@
          ,sync_req/2, sync_resp/2
          ,pause/2
          ,resume/1
+         ,update_presence/3
+         ,agent_logout/1
          ,refresh/2
          ,current_call/1
          ,status/1
@@ -81,13 +83,16 @@
 
 -define(WRAPUP_FINISHED, 'wrapup_finished').
 
--define(MAX_FAILURES, whapps_config:get_integer(?CONFIG_CAT, <<"max_connect_failures">>, 3)).
+-define(MAX_CONNECT_FAILURES, <<"max_connect_failures">>).
+-define(MAX_FAILURES, whapps_config:get_integer(?CONFIG_CAT, ?MAX_CONNECT_FAILURES, 3)).
 
 -define(NOTIFY_PICKUP, <<"pickup">>).
 -define(NOTIFY_HANGUP, <<"hangup">>).
 -define(NOTIFY_CDR, <<"cdr">>).
 -define(NOTIFY_RECORDING, <<"recording">>).
 -define(NOTIFY_ALL, <<"all">>).
+
+-define(RESOURCE_TYPE_AUDIO, <<"audio">>).
 
 -record(state, {account_id :: ne_binary()
                 ,account_db :: ne_binary()
@@ -116,6 +121,7 @@
                 ,outbound_call_id :: api_binary()
                 ,max_connect_failures :: wh_timeout()
                 ,connect_failures = 0 :: non_neg_integer()
+                ,agent_state_updates = [] :: list()
                }).
 -type fsm_state() :: #state{}.
 
@@ -253,7 +259,7 @@ sync_resp(FSM, JObj) ->
 %%--------------------------------------------------------------------
 -spec pause(server_ref(), wh_timeout()) -> 'ok'.
 pause(FSM, Timeout) ->
-    gen_fsm:send_event(FSM, {'pause', Timeout}).
+    gen_fsm:send_all_state_event(FSM, {'pause', Timeout}).
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -261,7 +267,23 @@ pause(FSM, Timeout) ->
 %%--------------------------------------------------------------------
 -spec resume(server_ref()) -> 'ok'.
 resume(FSM) ->
-    gen_fsm:send_event(FSM, {'resume'}).
+    gen_fsm:send_all_state_event(FSM, {'resume'}).
+
+%%--------------------------------------------------------------------
+%% @doc
+%% @end
+%%--------------------------------------------------------------------
+-spec update_presence(server_ref(), ne_binary(), ne_binary()) -> 'ok'.
+update_presence(FSM, PresenceId, PresenceState) ->
+    gen_fsm:send_all_state_event(FSM, {'update_presence', PresenceId, PresenceState}).
+
+%%--------------------------------------------------------------------
+%% @doc
+%% @end
+%%--------------------------------------------------------------------
+-spec agent_logout(server_ref()) -> 'ok'.
+agent_logout(FSM) ->
+    gen_fsm:send_all_state_event(FSM, {'agent_logout'}).
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -290,8 +312,8 @@ status(FSM) -> gen_fsm:sync_send_event(FSM, 'status').
 -spec start_link(ne_binary(), ne_binary(), pid(), wh_proplist()) -> startlink_ret().
 
 start_link(Supervisor, AgentJObj) when is_pid(Supervisor) ->
-    pvt_start_link(wh_json:get_value(<<"pvt_account_id">>, AgentJObj)
-                   ,wh_json:get_value(<<"_id">>, AgentJObj)
+    pvt_start_link(wh_doc:account_id(AgentJObj)
+                   ,wh_doc:id(AgentJObj)
                    ,Supervisor
                    ,[]
                    ,'false'
@@ -311,11 +333,11 @@ start_link(Supervisor, _AgentJObj, AccountId, AgentId, _Queues) ->
 
 pvt_start_link('undefined', _AgentId, Supervisor, _, _) ->
     lager:debug("agent ~s trying to start with no account id", [_AgentId]),
-    spawn('acdc_agent_sup', 'stop', [Supervisor]),
+    _ = wh_util:spawn('acdc_agent_sup', 'stop', [Supervisor]),
     'ignore';
 pvt_start_link(_AccountId, 'undefined', Supervisor, _, _) ->
     lager:debug("undefined agent id trying to start in account ~s", [_AccountId]),
-    spawn('acdc_agent_sup', 'stop', [Supervisor]),
+    _ = wh_util:spawn('acdc_agent_sup', 'stop', [Supervisor]),
     'ignore';
 pvt_start_link(AccountId, AgentId, Supervisor, Props, IsThief) ->
     gen_fsm:start_link(?MODULE, [AccountId, AgentId, Supervisor, Props, IsThief], []).
@@ -324,7 +346,7 @@ new_endpoint(FSM, EP) ->
     lager:debug("sending EP to ~p: ~p", [FSM, EP]).
 edited_endpoint(FSM, EP) ->
     lager:debug("sending EP to ~p: ~p", [FSM, EP]),
-    gen_fsm:send_all_state_event(FSM, {'edited_endpoint', wh_json:get_value(<<"_id">>, EP), EP}).
+    gen_fsm:send_all_state_event(FSM, {'edited_endpoint', wh_doc:id(EP), EP}).
 deleted_endpoint(FSM, EP) -> lager:debug("sending EP to ~p: ~p", [FSM, EP]).
 
 %%%===================================================================
@@ -346,34 +368,28 @@ deleted_endpoint(FSM, EP) -> lager:debug("sending EP to ~p: ~p", [FSM, EP]).
 %%--------------------------------------------------------------------
 init([AccountId, AgentId, Supervisor, Props, IsThief]) ->
     FSMCallId = <<"fsm_", AccountId/binary, "_", AgentId/binary>>,
-    put('callid', FSMCallId),
+    wh_util:put_callid(FSMCallId),
     lager:debug("started acdc agent fsm"),
 
     Self = self(),
-    _P = spawn(?MODULE, 'wait_for_listener', [Supervisor, Self, Props, IsThief]),
+    _P = wh_util:spawn(?MODULE, 'wait_for_listener', [Supervisor, Self, Props, IsThief]),
     lager:debug("waiting for listener in ~p", [_P]),
-    AccountDb = wh_util:format_account_id(AccountId, 'encoded'),
 
-    {'ok', 'wait', #state{account_id=AccountId
-                          ,account_db=AccountDb
-                          ,agent_id=AgentId
-                          ,fsm_call_id=FSMCallId
-                          ,max_connect_failures=max_failures(AccountDb, AccountId)
+    {'ok', 'wait', #state{account_id = AccountId
+                          ,account_db = wh_util:format_account_id(AccountId, 'encoded')
+                          ,agent_id = AgentId
+                          ,fsm_call_id = FSMCallId
+                          ,max_connect_failures = max_failures(AccountId)
                          }}.
 
--spec max_failures(ne_binary(), ne_binary()) -> non_neg_integer().
--spec max_failures(wh_json:object()) -> non_neg_integer().
-max_failures(AcctDb, AcctId) ->
-    case couch_mgr:open_cache_doc(AcctDb, AcctId) of
-        {'ok', AcctJObj} -> max_failures(AcctJObj);
+-spec max_failures(ne_binary() | wh_json:object()) -> non_neg_integer().
+max_failures(Account) when is_binary(Account) ->
+    case kz_account:fetch(Account) of
+        {'ok', AccountJObj} -> max_failures(AccountJObj);
         {'error', _} -> ?MAX_FAILURES
-    end.
-
+    end;
 max_failures(JObj) ->
-    case wh_json:get_integer_value(<<"max_connect_failures">>, JObj) of
-        'undefined' -> ?MAX_FAILURES;
-        N -> N
-    end.
+    wh_json:get_integer_value(?MAX_CONNECT_FAILURES, JObj, ?MAX_FAILURES).
 
 -spec wait_for_listener(pid(), pid(), wh_proplist(), boolean()) -> 'ok'.
 wait_for_listener(Supervisor, FSM, Props, IsThief) ->
@@ -438,7 +454,7 @@ sync({'timeout', Ref, ?SYNC_RESPONSE_MESSAGE}, #state{sync_ref=Ref
     acdc_agent_stats:agent_ready(AccountId, AgentId),
     acdc_agent_listener:presence_update(AgentListener, ?PRESENCE_GREEN),
 
-    {'next_state', 'ready', State#state{sync_ref=Ref}};
+    apply_state_updates(State#state{sync_ref=Ref});
 sync({'timeout', Ref, ?RESYNC_RESPONSE_MESSAGE}, #state{sync_ref=Ref}=State) when is_reference(Ref) ->
     lager:debug("resync timer expired, lets check with the others again"),
     SyncRef = start_sync_timer(),
@@ -476,7 +492,9 @@ sync({'sync_resp', JObj}, #state{sync_ref=Ref
             _ = erlang:cancel_timer(Ref),
             acdc_agent_stats:agent_ready(AccountId, AgentId),
             acdc_agent_listener:presence_update(AgentListener, ?PRESENCE_GREEN),
-            {'next_state', 'ready', State#state{sync_ref='undefined'}, 'hibernate'};
+            {Next, SwitchTo, State} =
+                apply_state_updates(State#state{sync_ref='undefined'}),
+            {Next, SwitchTo, State, 'hibernate'};
         {'EXIT', _} ->
             lager:debug("other agent sent unusable state, ignoring"),
             {'next_state', 'sync', State};
@@ -488,15 +506,6 @@ sync({'sync_resp', JObj}, #state{sync_ref=Ref
 sync({'member_connect_req', _}, State) ->
     lager:debug("member_connect_req recv, not ready"),
     {'next_state', 'sync', State};
-sync({'pause', Timeout}, #state{account_id=AccountId
-                                ,agent_id=AgentId
-                                ,agent_listener=AgentListener
-                               }=State) ->
-    lager:debug("recv status update:, pausing for up to ~b s", [Timeout]),
-    Ref = start_pause_timer(Timeout),
-    acdc_agent_stats:agent_paused(AccountId, AgentId, Timeout),
-    acdc_agent_listener:presence_update(AgentListener, ?PRESENCE_RED_FLASH),
-    {'next_state', 'paused', State#state{pause_ref=Ref}};
 sync(?NEW_CHANNEL_FROM(CallId), State) ->
     lager:debug("sync call_from outbound: ~s", [CallId]),
     {'next_state', 'outbound', start_outbound_call_handling(CallId, State), 'hibernate'};
@@ -517,16 +526,6 @@ sync('current_call', _, State) ->
 %% @doc
 %% @end
 %%--------------------------------------------------------------------
-ready({'pause', Timeout}, #state{account_id=AccountId
-                                 ,agent_id=AgentId
-                                 ,agent_listener=AgentListener
-                                }=State) ->
-    lager:debug("recv status update: pausing for up to ~b s", [Timeout]),
-    Ref = start_pause_timer(Timeout),
-    acdc_agent_stats:agent_paused(AccountId, AgentId, Timeout),
-    acdc_agent_listener:presence_update(AgentListener, ?PRESENCE_RED_FLASH),
-
-    {'next_state', 'paused', State#state{pause_ref=Ref}};
 ready({'sync_req', JObj}, #state{agent_listener=AgentListener}=State) ->
     lager:debug("recv sync_req from ~s", [wh_json:get_value(<<"Server-ID">>, JObj)]),
     acdc_agent_listener:send_sync_resp(AgentListener, 'ready', JObj),
@@ -541,7 +540,7 @@ ready({'member_connect_win', JObj}, #state{agent_listener=AgentListener
     Call = whapps_call:from_json(wh_json:get_value(<<"Call">>, JObj)),
     CallId = whapps_call:call_id(Call),
 
-    put('callid', CallId),
+    wh_util:put_callid(CallId),
 
     WrapupTimer = wh_json:get_integer_value(<<"Wrapup-Timeout">>, JObj, 0),
     CallerExitKey = wh_json:get_value(<<"Caller-Exit-Key">>, JObj, <<"#">>),
@@ -620,8 +619,6 @@ ready({'channel_unbridged', CallId}, #state{agent_listener=_AgentListener}=State
     {'next_state', 'ready', State};
 ready({'leg_destroyed', CallId}, #state{agent_listener=_AgentListener}=State) ->
     lager:debug("channel unbridged: ~s", [CallId]),
-    {'next_state', 'ready', State};
-ready({'resume'}, State) ->
     {'next_state', 'ready', State};
 ready({'dtmf_pressed', _}, State) ->
     {'next_state', 'ready', State};
@@ -702,10 +699,12 @@ ringing({'originate_failed', E}, #state{agent_listener=AgentListener
 
     acdc_agent_listener:presence_update(AgentListener, ?PRESENCE_GREEN),
 
-    {'next_state'
-     ,return_to_state(Fails+1, MaxFails, AccountId, AgentId)
-     ,clear_call(State, 'failed')
-    };
+    NewFSMState = clear_call(State, 'failed'),
+    NextState = return_to_state(Fails+1, MaxFails, AccountId, AgentId),
+    case NextState of
+        'paused' -> {'next_state', 'paused', NewFSMState};
+        'ready' -> apply_state_updates(NewFSMState)
+    end;
 ringing({'agent_timeout', _JObj}, #state{agent_listener=AgentListener
                                          ,account_id=AccountId
                                          ,agent_id=AgentId
@@ -719,10 +718,12 @@ ringing({'agent_timeout', _JObj}, #state{agent_listener=AgentListener
     acdc_stats:call_missed(AccountId, QueueId, AgentId, CallId, <<"timeout">>),
 
     acdc_agent_listener:presence_update(AgentListener, ?PRESENCE_GREEN),
-    {'next_state'
-     ,return_to_state(Fails+1, MaxFails, AccountId, AgentId)
-     ,clear_call(State, 'failed')
-    };
+    NewFSMState = clear_call(State, 'failed'),
+    NextState = return_to_state(Fails+1, MaxFails, AccountId, AgentId),
+    case NextState of
+        'paused' -> {'next_state', 'paused', NewFSMState};
+        'ready' -> apply_state_updates(NewFSMState)
+    end;
 ringing({'channel_bridged', MemberCallId}, #state{member_call_id=MemberCallId
                                              ,member_call=MemberCall
                                              ,agent_listener=AgentListener
@@ -759,10 +760,12 @@ ringing({'channel_hungup', AgentCallId, Cause}, #state{agent_listener=AgentListe
 
     acdc_agent_listener:presence_update(AgentListener, ?PRESENCE_GREEN),
 
-    {'next_state'
-     ,return_to_state(Fails+1, MaxFails, AccountId, AgentId)
-     ,clear_call(State, 'failed')
-    };
+    NewFSMState = clear_call(State, 'failed'),
+    NextState = return_to_state(Fails+1, MaxFails, AccountId, AgentId),
+    case NextState of
+        'paused' -> {'next_state', 'paused', NewFSMState};
+        'ready' -> apply_state_updates(NewFSMState)
+    end;
 ringing({'channel_hungup', MemberCallId, _Cause}, #state{agent_listener=AgentListener
                                                          ,account_id=AccountId
                                                          ,agent_id=AgentId
@@ -774,7 +777,7 @@ ringing({'channel_hungup', MemberCallId, _Cause}, #state{agent_listener=AgentLis
     acdc_agent_stats:agent_ready(AccountId, AgentId),
 
     acdc_agent_listener:presence_update(AgentListener, ?PRESENCE_GREEN),
-    {'next_state', 'ready', clear_call(State, 'ready')};
+    apply_state_updates(clear_call(State, 'ready'));
 ringing({'dtmf_pressed', DTMF}, #state{caller_exit_key=DTMF
                                        ,agent_listener=AgentListener
                                        ,agent_call_id=AgentCallId
@@ -788,7 +791,7 @@ ringing({'dtmf_pressed', DTMF}, #state{caller_exit_key=DTMF
 
     acdc_agent_listener:presence_update(AgentListener, ?PRESENCE_GREEN),
 
-    {'next_state', 'ready', clear_call(State, 'ready')};
+    apply_state_updates(clear_call(State, 'ready'));
 ringing({'dtmf_pressed', DTMF}, #state{caller_exit_key=_ExitKey}=State) ->
     lager:debug("caller pressed ~s, exit key is ~s", [DTMF, _ExitKey]),
     {'next_state', 'ringing', State};
@@ -888,7 +891,7 @@ answered({'dialplan_error', _App}, #state{agent_listener=AgentListener
     acdc_agent_stats:agent_ready(AccountId, AgentId),
 
     acdc_agent_listener:presence_update(AgentListener, ?PRESENCE_GREEN),
-    {'next_state', 'ready', clear_call(State, 'ready')};
+    apply_state_updates(clear_call(State, 'ready'));
 answered({'channel_bridged', CallId}, #state{member_call_id=CallId
                                              ,agent_listener=AgentListener
                                              ,queue_notifications=Ns
@@ -984,7 +987,7 @@ wrapup({'timeout', Ref, ?WRAPUP_FINISHED}, #state{wrapup_ref=Ref
     acdc_agent_stats:agent_ready(AccountId, AgentId),
     acdc_agent_listener:presence_update(AgentListener, ?PRESENCE_GREEN),
 
-    {'next_state', 'ready', clear_call(State, 'ready')};
+    apply_state_updates(clear_call(State, 'ready'));
 wrapup({'sync_req', JObj}, #state{agent_listener=AgentListener
                                   ,wrapup_ref=Ref
                                  }=State) ->
@@ -1041,22 +1044,7 @@ paused({'timeout', Ref, ?PAUSE_MESSAGE}, #state{pause_ref=Ref
     acdc_agent_stats:agent_ready(AccountId, AgentId),
     acdc_agent_listener:presence_update(AgentListener, ?PRESENCE_GREEN),
 
-    {'next_state', 'ready', clear_call(State#state{sync_ref='undefined'}, 'ready')};
-paused({'resume'}, #state{account_id=AccountId
-                          ,agent_id=AgentId
-                          ,agent_listener=AgentListener
-                          ,pause_ref=Ref
-                         }=State) ->
-    lager:debug("resume received, putting agent back into action"),
-    maybe_stop_timer(Ref),
-
-    acdc_agent_listener:update_agent_status(AgentListener, <<"resume">>),
-
-    acdc_agent_listener:send_status_resume(AgentListener),
-    acdc_agent_stats:agent_ready(AccountId, AgentId),
-    acdc_agent_listener:presence_update(AgentListener, ?PRESENCE_GREEN),
-
-    {'next_state', 'ready', clear_call(State, 'ready')};
+    apply_state_updates(clear_call(State#state{sync_ref='undefined'}, 'ready'));
 paused({'sync_req', JObj}, #state{agent_listener=AgentListener
                                   ,pause_ref=Ref
                                  }=State) ->
@@ -1115,15 +1103,6 @@ outbound({'member_connect_win', JObj}, #state{agent_listener=AgentListener}=Stat
     lager:debug("agent won, but can't process this right now (on outbound call)"),
     acdc_agent_listener:member_connect_retry(AgentListener, JObj),
     {'next_state', 'outbound', State};
-outbound({'pause', Timeout}, #state{account_id=AccountId
-                                    ,agent_id=AgentId
-                                    ,agent_listener=AgentListener
-                                   }=State) ->
-    lager:debug("recv a pause while on outbound call; assuming agent called to pause for ~b", [Timeout]),
-    Ref = start_pause_timer(Timeout),
-    acdc_agent_stats:agent_paused(AccountId, AgentId, Timeout),
-    acdc_agent_listener:presence_update(AgentListener, ?PRESENCE_RED_FLASH),
-    {'next_state', 'paused', clear_call(State#state{pause_ref=Ref}, 'paused')};
 outbound({'timeout', Ref, ?PAUSE_MESSAGE}, #state{pause_ref=Ref}=State) ->
     lager:debug("pause timer expired while outbound"),
     {'next_state', 'outbound', State#state{pause_ref='undefined'}};
@@ -1145,21 +1124,6 @@ outbound({'channel_bridged', _}, State) ->
     {'next_state', 'outbound', State};
 outbound({'channel_unbridged', _}, State) ->
     {'next_state', 'outbound', State};
-outbound({'resume'}, #state{account_id=AccountId
-                          ,agent_id=AgentId
-                          ,agent_listener=AgentListener
-                          ,pause_ref=Ref
-                         }=State) ->
-    lager:debug("resume received, putting agent back into action"),
-    maybe_stop_timer(Ref),
-
-    acdc_agent_listener:update_agent_status(AgentListener, <<"resume">>),
-
-    acdc_agent_listener:send_status_resume(AgentListener),
-    acdc_agent_stats:agent_ready(AccountId, AgentId),
-    acdc_agent_listener:presence_update(AgentListener, ?PRESENCE_GREEN),
-
-    {'next_state', 'ready', clear_call(State, 'ready')};
 outbound(?NEW_CHANNEL_TO(CallId), #state{outbound_call_id=CallId}=State) ->
     {'next_state', 'outbound', State};
 outbound(_Msg, State) ->
@@ -1190,6 +1154,32 @@ outbound('current_call', _, State) ->
 %%                   {stop, Reason, NewState}
 %% @end
 %%--------------------------------------------------------------------
+handle_event({'agent_logout'}, 'ready', State) ->
+    handle_agent_logout(State),
+    {'next_state', 'ready', State};
+handle_event({'agent_logout'} = Event, StateName, #state{agent_state_updates = Queue} = State) ->
+    NewQueue = [Event | Queue],
+    {'next_state', StateName, State#state{agent_state_updates = NewQueue}};
+handle_event({'resume'}, 'ready', State) ->
+    {'next_state', 'ready', State};
+handle_event({'resume'}, 'paused', State) ->
+    ReadyState = handle_resume(State),
+    {'next_state', 'ready', apply_state_updates(ReadyState)};
+handle_event({'resume'} = Event, StateName, #state{agent_state_updates = Queue} = State) ->
+    NewQueue = [Event | Queue],
+    {'next_state', StateName, State#state{agent_state_updates = NewQueue}};
+handle_event({'pause', Timeout}, 'ready', State) ->
+    lager:debug("recv status update: pausing for up to ~b s", [Timeout]),
+    {'next_state', 'paused', handle_pause(Timeout, State)};
+handle_event({'pause', _} = Event, StateName, #state{agent_state_updates = Queue} = State) ->
+    NewQueue = [Event | Queue],
+    {'next_state', StateName, State#state{agent_state_updates = NewQueue}};
+handle_event({'update_presence', PresenceId, PresenceState}, 'ready', State) ->
+    handle_presence_update(PresenceId, PresenceState, State),
+    {'next_state', 'ready', State};
+handle_event({'update_presence', _, _} = Event, StateName, #state{agent_state_updates = Queue} = State) ->
+    NewQueue = [Event | Queue],
+    {'next_state', StateName, State#state{agent_state_updates = NewQueue}};
 handle_event({'refresh', AgentJObj}, StateName, #state{agent_listener=AgentListener}=State) ->
     acdc_agent_listener:refresh_config(AgentListener, wh_json:get_value(<<"queues">>, AgentJObj)),
     {'next_state', StateName, State};
@@ -1202,14 +1192,13 @@ handle_event('load_endpoints', StateName, #state{agent_id=AgentId
                                                  ,account_id=AccountId
                                                  ,account_db=AccountDb
                                                 }=State) ->
-    Setters = [fun(C) -> whapps_call:set_account_id(AccountId, C) end
-               ,fun(C) -> whapps_call:set_account_db(AccountDb, C) end
-               ,fun(C) -> whapps_call:set_owner_id(AgentId, C) end
+    Setters = [{fun whapps_call:set_account_id/2, AccountId}
+               ,{fun whapps_call:set_account_db/2, AccountDb}
+               ,{fun whapps_call:set_owner_id/2, AgentId}
+               ,{fun whapps_call:set_resource_type/2, ?RESOURCE_TYPE_AUDIO}
               ],
 
-    Call = lists:foldl(fun(F, C) -> F(C) end
-                       ,whapps_call:new(), Setters
-                      ),
+    Call = whapps_call:exec(Setters, whapps_call:new()),
 
     %% Inform us of things with us as owner
     catch gproc:reg(?OWNER_UPDATE_REG(AccountId, AgentId)),
@@ -1264,7 +1253,7 @@ handle_info({'endpoint_edited', EP}, StateName, #state{endpoints=EPs
                                                        ,agent_id=AgentId
                                                        ,agent_listener=AgentListener
                                                       }=State) ->
-    EPId = wh_json:get_value(<<"_id">>, EP),
+    EPId = wh_doc:id(EP),
     case wh_json:get_value(<<"owner_id">>, EP) of
         AgentId ->
             lager:debug("device ~s edited, we're the owner, maybe adding it", [EPId]),
@@ -1277,7 +1266,7 @@ handle_info({'endpoint_deleted', EP}, StateName, #state{endpoints=EPs
                                                         ,account_id=AccountId
                                                         ,agent_listener=AgentListener
                                                        }=State) ->
-    EPId = wh_json:get_value(<<"_id">>, EP),
+    EPId = wh_doc:id(EP),
     lager:debug("device ~s deleted, maybe removing it", [EPId]),
     {'next_state', StateName, State#state{endpoints=maybe_remove_endpoint(EPId, EPs, AccountId, AgentListener)}, 'hibernate'};
 handle_info({'endpoint_created', EP}, StateName, #state{endpoints=EPs
@@ -1285,7 +1274,7 @@ handle_info({'endpoint_created', EP}, StateName, #state{endpoints=EPs
                                                         ,agent_id=AgentId
                                                         ,agent_listener=AgentListener
                                                        }=State) ->
-    EPId = wh_json:get_value(<<"_id">>, EP),
+    EPId = wh_doc:id(EP),
     case wh_json:get_value(<<"owner_id">>, EP) of
         AgentId ->
             lager:debug("device ~s created, we're the owner, maybe adding it", [EPId]),
@@ -1407,9 +1396,9 @@ clear_call(#state{fsm_call_id=FSMemberCallId
                   ,wrapup_ref=WRef
                   ,pause_ref=PRef
                  }=State, NextState)->
-    put('callid', FSMemberCallId),
+    wh_util:put_callid(FSMemberCallId),
 
-    ReadyForAction = not(NextState =:= 'wrapup' orelse NextState =:= 'paused'),
+    ReadyForAction = not (NextState =:= 'wrapup' orelse NextState =:= 'paused'),
     lager:debug("ready for action: ~s: ~s", [NextState, ReadyForAction]),
 
     _ = maybe_stop_timer(WRef, ReadyForAction),
@@ -1488,7 +1477,7 @@ start_outbound_call_handling(CallId, #state{agent_listener=AgentListener
                                             ,account_id=AccountId
                                             ,agent_id=AgentId
                                            }=State) when is_binary(CallId) ->
-    _ = put('callid', CallId),
+    wh_util:put_callid(CallId),
     lager:debug("agent making outbound call, not receiving ACDc calls"),
     acdc_agent_listener:outbound_call(AgentListener, CallId),
     acdc_agent_stats:agent_outbound(AccountId, AgentId, CallId),
@@ -1517,7 +1506,8 @@ outbound_hungup(#state{agent_listener=AgentListener
                     lager:debug("wrapup left: ~p pause left: ~p", [_W, _P]),
                     acdc_agent_stats:agent_ready(AccountId, AgentId),
                     acdc_agent_listener:presence_update(AgentListener, ?PRESENCE_GREEN),
-                    {'next_state', 'ready', clear_call(State, 'ready'), 'hibernate'}
+                    {Next, SwitchTo, State} = apply_state_updates(clear_call(State, 'ready')),
+                    {Next, SwitchTo, State, 'hibernate'}
             end
     end.
 
@@ -1542,12 +1532,12 @@ find_sip_username(_EP, Username) -> Username.
 -spec find_endpoint_id(wh_json:object(), api_binary()) -> api_binary().
 
 find_endpoint_id(EP) ->
-    find_endpoint_id(EP, wh_json:get_value(<<"_id">>, EP)).
+    find_endpoint_id(EP, wh_doc:id(EP)).
 
 find_endpoint_id(EP, 'undefined') -> wh_json:get_value(<<"Endpoint-ID">>, EP);
 find_endpoint_id(_EP, EPId) -> EPId.
 
--spec monitor_endpoint(wh_json:object(), ne_binary(), server_ref()) -> any().
+-spec monitor_endpoint(wh_json:object(), ne_binary(), server_ref()) -> _.
 monitor_endpoint(EP, AccountId, AgentListener) ->
     %% Bind for outbound call requests
     acdc_agent_listener:add_endpoint_bindings(AgentListener
@@ -1558,7 +1548,7 @@ monitor_endpoint(EP, AccountId, AgentListener) ->
     catch gproc:reg(?ENDPOINT_UPDATE_REG(AccountId, find_endpoint_id(EP))),
     catch gproc:reg(?NEW_CHANNEL_REG(AccountId, find_username(EP))).
 
--spec unmonitor_endpoint(wh_json:object(), ne_binary(), server_ref()) -> any().
+-spec unmonitor_endpoint(wh_json:object(), ne_binary(), server_ref()) -> _.
 unmonitor_endpoint(EP, AccountId, AgentListener) ->
     %% Bind for outbound call requests
     acdc_agent_listener:remove_endpoint_bindings(AgentListener
@@ -1566,12 +1556,12 @@ unmonitor_endpoint(EP, AccountId, AgentListener) ->
                                         ,find_username(EP)
                                        ),
     %% Inform us of device changes
-    catch gproc:unreg(?ENDPOINT_UPDATE_REG(AccountId, wh_json:get_value(<<"_id">>, EP))),
+    catch gproc:unreg(?ENDPOINT_UPDATE_REG(AccountId, wh_doc:id(EP))),
     catch gproc:unreg(?NEW_CHANNEL_REG(AccountId, find_username(EP))).
 
--spec maybe_add_endpoint(ne_binary(), wh_json:object(), wh_json:objects(), ne_binary(), server_ref()) -> any().
+-spec maybe_add_endpoint(ne_binary(), wh_json:object(), wh_json:objects(), ne_binary(), server_ref()) -> _.
 maybe_add_endpoint(EPId, EP, EPs, AccountId, AgentListener) ->
-    case lists:partition(fun(E) -> wh_json:get_value(<<"_id">>, E) =:= EPId end, EPs) of
+    case lists:partition(fun(E) -> wh_doc:id(E) =:= EPId end, EPs) of
         {[], _} ->
             lager:debug("endpoint ~s not in our list, adding it", [EPId]),
             [begin monitor_endpoint(EP, AccountId, AgentListener), EP end | EPs];
@@ -1580,7 +1570,7 @@ maybe_add_endpoint(EPId, EP, EPs, AccountId, AgentListener) ->
 
 -spec maybe_remove_endpoint(ne_binary(), wh_json:objects(), ne_binary(), server_ref()) -> wh_json:objects().
 maybe_remove_endpoint(EPId, EPs, AccountId, AgentListener) ->
-    case lists:partition(fun(EP) -> wh_json:get_value(<<"_id">>, EP) =:= EPId end, EPs) of
+    case lists:partition(fun(EP) -> wh_doc:id(EP) =:= EPId end, EPs) of
         {[], _} -> EPs; %% unknown endpoint
         {[RemoveEP], EPs1} ->
             lager:debug("endpoint ~s in our list, removing it", [EPId]),
@@ -1649,12 +1639,12 @@ maybe_notify(Ns, Key, State) ->
                 'undefined' -> 'ok';
                 Url ->
                     lager:debug("send update for ~s to ~s", [?NOTIFY_ALL, Url]),
-                    _P = spawn(fun() -> notify(Url, get_method(Ns), Key, State) end),
+                    _P = wh_util:spawn(fun() -> notify(Url, get_method(Ns), Key, State) end),
                     'ok'
             end;
         Url ->
             lager:debug("send update for ~s to ~s", [Key, Url]),
-            _P = spawn(fun() -> notify(Url, get_method(Ns), Key, State) end),
+            _P = wh_util:spawn(fun() -> notify(Url, get_method(Ns), Key, State) end),
             'ok'
     end.
 
@@ -1676,7 +1666,7 @@ notify(Url, Method, Key, #state{account_id=AccountId
                                 ,agent_call_id=AgentCallId
                                 ,member_call_queue_id=QueueId
                                }) ->
-    put('callid', whapps_call:call_id(MemberCall)),
+    wh_util:put_callid(whapps_call:call_id(MemberCall)),
     Data = wh_json:from_list(
              props:filter_undefined(
                [{<<"account_id">>, AccountId}
@@ -1743,3 +1733,70 @@ uri(URI, QueryString) ->
         {Scheme, Host, Path, QS, Fragment} ->
             mochiweb_util:urlunsplit({Scheme, Host, Path, [QS, "&", QueryString], Fragment})
     end.
+
+-spec apply_state_updates(fsm_state()) -> {'next_state', atom(), fsm_state()}.
+apply_state_updates(#state{agent_state_updates=Q}=State) ->
+    {Atom, ModState} =
+        lists:foldl(fun state_step/2
+                    ,{'ready', State}
+                    ,lists:reverse(Q)
+                   ),
+    {'next_state', Atom, ModState#state{agent_state_updates = []}}.
+
+-type state_acc() :: {atom(), fsm_state()}.
+-spec state_step(term(), state_acc()) -> state_acc().
+state_step({'pause', Timeout}, {_, State}) ->
+    {'paused', handle_pause(Timeout, State)};
+state_step({'resume'}, {_, State}) ->
+    {'ready', handle_resume(State)};
+state_step({'agent_logout'}, {NextState, State}) ->
+    handle_agent_logout(State),
+    {NextState, State};
+state_step({'update_presence', PresenceId, PresenceState}, {NextState, State}) ->
+    handle_presence_update(PresenceId, PresenceState, State),
+    {NextState, State}.
+
+-spec handle_agent_logout(fsm_state()) -> 'ok'.
+handle_agent_logout(#state{account_id = AccountId
+                           ,agent_id = AgentId
+                          }) ->
+    acdc_agent_stats:agent_logged_out(AccountId, AgentId),
+    Sup = acdc_agents_sup:find_agent_supervisor(AccountId, AgentId),
+    acdc_agent_listener:logout_agent(acdc_agent_sup:listener(Sup)),
+    _Stop = acdc_agent_sup:stop(Sup),
+    lager:debug("supervisor ~p stopping agent: ~p", [Sup, _Stop]).
+
+-spec handle_presence_update(ne_binary(), ne_binary(), fsm_state()) -> 'ok'.
+handle_presence_update(PresenceId, PresenceState, #state{agent_id = AgentId
+                                                         ,account_id = AccountId
+                                                        }) ->
+    Super = acdc_agents_sup:find_agent_supervisor(AccountId, AgentId),
+    Listener = acdc_agent_sup:listener(Super),
+    acdc_agent_listener:maybe_update_presence_id(Listener, PresenceId),
+    acdc_agent_listener:presence_update(Listener, PresenceState).
+
+-spec handle_resume(fsm_state()) -> fsm_state().
+handle_resume(#state{account_id=AccountId
+                     ,agent_id=AgentId
+                     ,agent_listener=AgentListener
+                     ,pause_ref=Ref
+                    }=State) ->
+    lager:debug("resume received, putting agent back into action"),
+    maybe_stop_timer(Ref),
+
+    acdc_agent_listener:update_agent_status(AgentListener, <<"resume">>),
+
+    acdc_agent_listener:send_status_resume(AgentListener),
+    acdc_agent_stats:agent_ready(AccountId, AgentId),
+    acdc_agent_listener:presence_update(AgentListener, ?PRESENCE_GREEN),
+    State#state{pause_ref='undefined'}.
+
+-spec handle_pause(integer(), fsm_state()) -> fsm_state().
+handle_pause(Timeout, #state{account_id=AccountId
+                             ,agent_id=AgentId
+                             ,agent_listener=AgentListener
+                            }=State) ->
+    Ref = start_pause_timer(Timeout),
+    acdc_agent_stats:agent_paused(AccountId, AgentId, Timeout),
+    acdc_agent_listener:presence_update(AgentListener, ?PRESENCE_RED_FLASH),
+    State#state{pause_ref=Ref}.

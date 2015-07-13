@@ -27,7 +27,6 @@
 -export([create_masquerade_event/2, create_masquerade_event/3]).
 -export([media_path/3, media_path/4
          ,lookup_media/4
-         ,cached_media_expelled/3
         ]).
 -export([unserialize_fs_array/1]).
 -export([convert_fs_evt_name/1, convert_whistle_app_name/1]).
@@ -357,8 +356,7 @@ maybe_sanitize_fs_value(_, Val) -> Val.
 %% @doc
 %% @end
 %%--------------------------------------------------------------------
--spec set(atom(), ne_binary(), wh_proplist()) ->
-                 ecallmgr_util:send_cmd_ret().
+-spec set(atom(), ne_binary(), wh_proplist()) -> send_cmd_ret().
 set(_, _, []) -> 'ok';
 set(Node, UUID, [{<<"Auto-Answer", _/binary>> = K, V}]) ->
     ecallmgr_fs_command:set(Node, UUID, [{<<"alert_info">>, <<"intercom">>}, get_fs_key_and_value(K, V, UUID)]);
@@ -432,8 +430,7 @@ set_fold(Node, UUID, {K, V}, Acc) ->
 %% @doc
 %% @end
 %%--------------------------------------------------------------------
--spec export(atom(), ne_binary(), wh_proplist()) ->
-                    ecallmgr_util:send_cmd_ret().
+-spec export(atom(), ne_binary(), wh_proplist()) -> send_cmd_ret().
 export(_, _, []) -> 'ok';
 export(Node, UUID, [{<<"Auto-Answer", _/binary>> = K, V} | Props]) ->
     Exports = [get_fs_key_and_value(Key, Val, UUID)
@@ -447,8 +444,7 @@ export(Node, UUID, Props) ->
     Exports = [get_fs_key_and_value(Key, Val, UUID) || {Key, Val} <- Props],
     ecallmgr_fs_command:export(Node, UUID, props:filter(Exports, 'skip')).
 
--spec bridge_export(atom(), ne_binary(), wh_proplist()) ->
-                    ecallmgr_util:send_cmd_ret().
+-spec bridge_export(atom(), ne_binary(), wh_proplist()) -> send_cmd_ret().
 bridge_export(_, _, []) -> 'ok';
 bridge_export(Node, UUID, [{<<"Auto-Answer", _/binary>> = K, V} | Props]) ->
     BridgeExports = get_fs_keys_and_values(UUID, Props),
@@ -639,7 +635,7 @@ build_bridge_channels([#bridge_endpoint{invite_format = <<"loopback">>}=Endpoint
 %% If this does not have an explicted sip route and we have no ip address, lookup the registration
 build_bridge_channels([#bridge_endpoint{ip_address='undefined'}=Endpoint|Endpoints], Channels) ->
     S = self(),
-    Pid = spawn(fun() -> S ! {self(), build_channel(Endpoint)} end),
+    Pid = wh_util:spawn(fun() -> S ! {self(), build_channel(Endpoint)} end),
     build_bridge_channels(Endpoints, [{'worker', Pid}|Channels]);
 %% If we have been given a IP to route to then do that now
 build_bridge_channels([Endpoint|Endpoints], Channels) ->
@@ -663,7 +659,7 @@ maybe_collect_worker_channel(Pid, Channels) ->
         {Pid, {'error', _}} -> Channels;
         {Pid, {'ok', Channel}} -> [Channel|Channels]
     after
-        2000 -> Channels
+        2 * ?MILLISECONDS_IN_SECOND -> Channels
     end.
 
 -spec build_channel(bridge_endpoint() | wh_json:object()) ->
@@ -879,7 +875,7 @@ create_masquerade_event(Application, EventName, Boolean) ->
 -spec media_path(ne_binary(), ne_binary(), wh_json:object()) -> ne_binary().
 media_path(MediaName, UUID, JObj) -> media_path(MediaName, 'new', UUID, JObj).
 
--spec media_path(ne_binary(), media_types(), ne_binary(), wh_json:object()) -> ne_binary().
+-spec media_path(api_binary(), media_types(), ne_binary(), wh_json:object()) -> ne_binary().
 media_path('undefined', _Type, _UUID, _) -> <<"silence_stream://5">>;
 media_path(MediaName, Type, UUID, JObj) when not is_binary(MediaName) ->
     media_path(wh_util:to_binary(MediaName), Type, UUID, JObj);
@@ -1021,16 +1017,13 @@ request_media_url(MediaName, CallId, JObj, Type) ->
                    | wh_api:default_headers(<<"media">>, <<"media_req">>, ?APP_NAME, ?APP_VERSION)
                   ])
                 ,JObj),
-    ReqResp = wh_amqp_worker:call(Request
-                                  ,fun wapi_media:publish_req/1
-                                  ,fun wapi_media:resp_v/1
-                                 ),
-    case ReqResp of
-        {'error', _E}=E ->
-            lager:debug("error get media url from amqp ~p", [E]),
-            E;
+    case wh_amqp_worker:call_collect(Request
+                                     ,fun wapi_media:publish_req/1
+                                     ,{'media_mgr', fun wapi_media:resp_v/1}
+                                    )
+    of
         {'ok', MediaResp} ->
-            MediaUrl = wh_json:get_value(<<"Stream-URL">>, MediaResp, <<>>),
+            MediaUrl = wh_json:find(<<"Stream-URL">>, MediaResp, <<>>),
             CacheProps = media_url_cache_props(MediaName),
             _ = wh_cache:store_local(?ECALLMGR_UTIL_CACHE
                                      ,?ECALLMGR_PLAYBACK_MEDIA_KEY(MediaName)
@@ -1038,39 +1031,30 @@ request_media_url(MediaName, CallId, JObj, Type) ->
                                      ,CacheProps
                                     ),
             lager:debug("media ~s stored to playback cache : ~s", [MediaName, MediaUrl]),
-            {'ok', MediaUrl}
+            {'ok', MediaUrl};
+        {'returned', _JObj, _BR} ->
+            lager:debug("no media manager available", []),
+            {'error', 'timeout'};
+        {'timeout', _Resp} ->
+            lager:debug("timeout when getting media url from amqp", []),
+            {'error', 'timeout'};
+        {'error', _R}=E ->
+            lager:debug("error when getting media url from amqp ~p", [_R]),
+            E
     end.
-
--define(DEFAULT_MEDIA_CACHE_PROPS
-        ,[{'callback', fun ?MODULE:cached_media_expelled/3}]
-       ).
 
 -spec media_url_cache_props(ne_binary()) -> wh_cache:store_options().
 media_url_cache_props(<<"/", _/binary>> = MediaName) ->
     case binary:split(MediaName, <<"/">>, ['global']) of
         [<<>>, AccountId, MediaId] ->
             AccountDb = wh_util:format_account_id(AccountId, 'encoded'),
-            [{'origin', {'db', AccountDb, MediaId}}
-             | ?DEFAULT_MEDIA_CACHE_PROPS
-            ];
-        _ -> ?DEFAULT_MEDIA_CACHE_PROPS
+            [{'origin', {'db', AccountDb, MediaId}}];
+        _Parts -> []
     end;
-media_url_cache_props(_MediaName) -> ?DEFAULT_MEDIA_CACHE_PROPS.
-
--spec cached_media_expelled(?ECALLMGR_PLAYBACK_MEDIA_KEY(ne_binary()), ne_binary(), atom()) -> 'ok'.
-cached_media_expelled(?ECALLMGR_PLAYBACK_MEDIA_KEY(MediaName), MediaUrl, _Reason) ->
-    lager:debug("media ~s was expelled(~p), flushing from media servers", [MediaName, _Reason]),
-    Nodes = ecallmgr_fs_nodes:connected(),
-    [maybe_flush_node_of_media(MediaUrl, N) || N <- Nodes],
-    'ok'.
-
--spec maybe_flush_node_of_media(ne_binary(), atom()) -> 'ok'.
-maybe_flush_node_of_media(_MediaUrl, _Node) ->
-    %% TODO: We need to both reduce the expelled
-    %%  notifications (they currently include things
-    %%  like voicemail message saves) as well as
-    %%  massively increase the effeciency of the flush.
-    'ok'.
+media_url_cache_props(<<"tts://", Text/binary>>) ->
+    Id = wh_util:binary_md5(Text),
+    [{'origin', {'db', <<"tts">>, Id}}];
+media_url_cache_props(_MediaName) -> [].
 
 -spec custom_sip_headers(wh_proplist()) -> wh_proplist().
 custom_sip_headers(Props) ->
@@ -1118,7 +1102,7 @@ maybe_add_expires_deviation_ms('undefined') -> 'undefined';
 maybe_add_expires_deviation_ms(Expires) when not is_integer(Expires) ->
     maybe_add_expires_deviation_ms(wh_util:to_integer(Expires));
 maybe_add_expires_deviation_ms(Expires) ->
-    maybe_add_expires_deviation(Expires) * 1000.
+    maybe_add_expires_deviation(Expires) * ?MILLISECONDS_IN_SECOND.
 
 -spec get_dial_separator(api_object() | ne_binary(), wh_json:objects()) -> ne_binary().
 get_dial_separator(?DIAL_METHOD_SIMUL, [_|T]) when T =/= [] -> ?SEPARATOR_SIMULTANEOUS;

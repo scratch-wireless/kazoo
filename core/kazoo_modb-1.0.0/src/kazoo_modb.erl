@@ -18,6 +18,8 @@
 -export([refresh_views/1]).
 -export([create/1]).
 -export([maybe_delete/2]).
+-export([get_range/3]).
+-export([get_year_month_sequence/3, get_year_month_sequence/4]).
 
 %%--------------------------------------------------------------------
 %% @public
@@ -80,7 +82,7 @@ get_results_missing_db(Account, View, ViewOptions, Retry) ->
 -spec open_doc(ne_binary(), ne_binary(), integer() | wh_proplist()) ->
                       {'ok', wh_json:object()} |
                       {'error', atom()}.
--spec open_doc(ne_binary(), ne_binary(), integer(), integer()) ->
+-spec open_doc(ne_binary(), ne_binary(), wh_year() | ne_binary(), wh_month() | ne_binary()) ->
                       {'ok', wh_json:object()} |
                       {'error', atom()}.
 open_doc(Account, <<Year:4/binary, Month:2/binary, "-", _/binary>> = DocId) ->
@@ -164,7 +166,7 @@ couch_save(AccountMODb, Doc, Retry) ->
 -spec get_modb(ne_binary()) -> ne_binary().
 -spec get_modb(ne_binary(), wh_proplist() | gregorian_seconds() | wh_now()) ->
                       ne_binary().
--spec get_modb(ne_binary(), integer(), integer()) ->
+-spec get_modb(ne_binary(), wh_year() | ne_binary(), wh_month() | ne_binary()) ->
                       ne_binary().
 get_modb(<<_:32/binary, "-", _:4/binary, _:2/binary>>=AccountMODb) ->
     AccountMODb;
@@ -189,7 +191,7 @@ get_modb(Account, Timestamp) ->
     wh_util:format_account_mod_id(Account, Timestamp).
 
 get_modb(<<_:32/binary, "-", _:4/binary, _:2/binary>>=AccountMODb, _Year, _Month) ->
-    AccountMODb;    
+    AccountMODb;
 get_modb(Account, Year, Month) ->
     wh_util:format_account_mod_id(Account, Year, Month).
 
@@ -319,3 +321,38 @@ delete_if_orphaned(AccountMODb, 'true') ->
     Succeeded = couch_mgr:db_delete(AccountMODb),
     lager:debug("cleanse orphaned modb ~p... ~p", [AccountMODb,Succeeded]),
     Succeeded.
+
+
+%% @public
+-spec get_range(ne_binary(), gregorian_seconds(), gregorian_seconds()) ->
+                       ne_binaries().
+get_range(AccountId, From, To) ->
+    {{FromYear, FromMonth, _}, _} = calendar:gregorian_seconds_to_datetime(From),
+    {{ToYear,   ToMonth,   _}, _} = calendar:gregorian_seconds_to_datetime(To),
+    [MODb
+     || MODb <- get_year_month_sequence(AccountId
+                                        ,{FromYear, FromMonth}
+                                        ,{ToYear, ToMonth}
+                                       ),
+        couch_mgr:db_exists(MODb)
+    ].
+
+-type year_month_tuple() :: {wh_year(), wh_month()}.
+
+%% @public
+-spec get_year_month_sequence(ne_binary(), year_month_tuple(), year_month_tuple()) ->
+                                     ne_binaries().
+get_year_month_sequence(Account, From, To) ->
+    get_year_month_sequence(Account, From, To, []).
+
+%% @public
+-spec get_year_month_sequence(ne_binary(), year_month_tuple(), year_month_tuple(), wh_proplist()) ->
+                                     ne_binaries().
+get_year_month_sequence(Account, Tuple, Tuple, Range) ->
+    ToMODbId = fun ({Year,Month}, Acc) -> [get_modb(Account, Year, Month)|Acc] end,
+    lists:foldl(ToMODbId, [], [Tuple|Range]);
+get_year_month_sequence(Account, {FromYear,13}, To, Range) ->
+    get_year_month_sequence(Account, {FromYear+1,1}, To, Range);
+get_year_month_sequence(Account, {FromYear,FromMonth}=From, {ToYear,ToMonth}=To, Range) ->
+        'true' = (FromYear * 12 + FromMonth) =< (ToYear * 12 + ToMonth),
+    get_year_month_sequence(Account, {FromYear,FromMonth+1}, To, [From|Range]).

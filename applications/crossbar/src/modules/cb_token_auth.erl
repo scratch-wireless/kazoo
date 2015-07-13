@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%%% @copyright (C) 2011-2014, 2600Hz INC
+%%% @copyright (C) 2011-2015, 2600Hz INC
 %%% @doc
 %%% Token auth module
 %%%
@@ -20,7 +20,7 @@
          ,delete/1
          ,authenticate/1
          ,finish_request/1
-         ,clean_expired/0
+         ,clean_expired/0, clean_expired/1
         ]).
 
 -include("../crossbar.hrl").
@@ -97,7 +97,7 @@ finish_request(Context, AuthDoc) ->
 
 -spec maybe_save_auth_doc(wh_json:object()) -> any().
 maybe_save_auth_doc(OldAuthDoc) ->
-    OldAuthModified = wh_json:get_integer_value(<<"pvt_modified">>, OldAuthDoc),
+    OldAuthModified = wh_doc:modified(OldAuthDoc),
     Now = wh_util:current_tstamp(),
 
     ToSaveTimeout = (?LOOP_TIMEOUT * ?PERCENT_OF_TIMEOUT) div 100,
@@ -108,29 +108,34 @@ maybe_save_auth_doc(OldAuthDoc) ->
         'true' ->
             lager:debug("auth doc is past time (~ps after) to be saved, saving", [TimeLeft]),
             couch_mgr:ensure_saved(?KZ_TOKEN_DB
-                                   ,wh_json:set_value(<<"pvt_modified">>, Now, OldAuthDoc)
+                                   ,wh_doc:set_modified(OldAuthDoc, Now)
                                   );
         'false' ->
             lager:debug("auth doc is too new (~ps to go), not saving", [TimeLeft*-1])
     end.
 
 -spec clean_expired() -> 'ok'.
+-spec clean_expired(gregorian_seconds()) -> 'ok'.
 clean_expired() ->
-    CreatedBefore = wh_util:current_tstamp() - ?LOOP_TIMEOUT, % gregorian seconds - Expiry time
+    clean_expired(wh_util:current_tstamp() - ?LOOP_TIMEOUT).
+
+clean_expired(CreatedBefore) ->
     ViewOpts = [{'startkey', 0}
                 ,{'endkey', CreatedBefore}
-                ,{'limit', 5000}
+                ,{'limit', couch_util:max_bulk_insert()}
                ],
 
     case couch_mgr:get_results(?KZ_TOKEN_DB, <<"token_auth/listing_by_mtime">>, ViewOpts) of
+        {'error', _E} -> lager:debug("failed to lookup expired tokens: ~p", [_E]);
         {'ok', []} -> lager:debug("no expired tokens found");
         {'ok', L} ->
             lager:debug("removing ~b expired tokens", [length(L)]),
+
+            couch_mgr:suppress_change_notice(),
             _ = couch_mgr:del_docs(?KZ_TOKEN_DB, L),
-            couch_compactor_fsm:compact_db(?KZ_TOKEN_DB),
-            'ok';
-        {'error', _E} ->
-            lager:debug("failed to lookup expired tokens: ~p", [_E])
+            couch_mgr:enable_change_notice(),
+
+            lager:debug("removed tokens")
     end.
 
 %%--------------------------------------------------------------------
@@ -176,9 +181,9 @@ check_auth_token(Context, AuthToken, _MagicPathed) ->
 is_expired(Context, JObj) ->
     AccountId = wh_json:get_value(<<"account_id">>, JObj),
     case wh_util:is_account_expired(AccountId) of
-        'false' -> check_restrictions(Context, JObj);
+        'false' -> check_as(Context, JObj);
         'true' ->
-            _ = spawn(fun() -> maybe_disable_account(AccountId) end),
+            _ = wh_util:spawn(fun() -> maybe_disable_account(AccountId) end),
             Cause = wh_json:from_list([{<<"cause">>, <<"account expired">>}]),
             {'halt', cb_context:add_system_error('forbidden', Cause, Context)}
     end.
@@ -201,42 +206,6 @@ disable_account(AccountId) ->
         'ok' -> lager:info("account ~s disabled because expired", [AccountId]);
         'failed' -> lager:error("falied to disable account ~s", [AccountId])
     end.
-
--spec check_restrictions(cb_context:context(), wh_json:object()) ->
-                                boolean() |
-                                {'true', cb_context:context()}.
-check_restrictions(Context, JObj) ->
-    case wh_json:get_value(<<"restrictions">>, JObj) of
-        'undefined' ->
-            lager:debug("no restrictions, check as object"),
-            check_as(Context, JObj);
-        Rs ->
-            check_restrictions(Context, JObj, Rs)
-    end.
-
--spec check_restrictions(cb_context:context(), wh_json:object(), wh_json:object()) ->
-                                boolean() |
-                                {'true', cb_context:context()}.
-check_restrictions(Context, JObj, Rs) ->
-    [_, _|PathTokens] = cb_context:path_tokens(Context),
-    Restrictions = get_restrictions(Context, Rs),
-    case crossbar_bindings:matches(Restrictions, PathTokens) of
-        'false' ->
-            lager:debug("failed to find any matches in restrictions"),
-            'false';
-        'true' ->
-            lager:debug("found matche in restrictions, check as object now"),
-            check_as(Context, JObj)
-    end.
-
--spec get_restrictions(cb_context:context(), wh_json:object()) ->
-                              ne_binaries().
-get_restrictions(Context, Restrictions) ->
-    Verb = wh_util:to_lower_binary(cb_context:req_verb(Context)),
-    DefaultRestrictions = wh_json:get_value(<<"*">>, Restrictions, []),
-    VerbRestrictions = wh_json:get_value(Verb, Restrictions, []),
-
-    lists:usort(VerbRestrictions ++ DefaultRestrictions).
 
 -spec check_as(cb_context:context(), wh_json:object()) ->
                       boolean() |
@@ -290,7 +259,7 @@ get_descendants(AccountId) ->
     of
         {'error', _}=Error -> Error;
         {'ok', JObjs} ->
-            {'ok', [wh_json:get_value(<<"id">>, JObj) || JObj <- JObjs]}
+            {'ok', [wh_doc:id(JObj) || JObj <- JObjs]}
     end.
 
 -spec set_auth_doc(cb_context:context(), wh_json:object()) -> cb_context:context().

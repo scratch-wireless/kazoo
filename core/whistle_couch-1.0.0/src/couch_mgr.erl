@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%%% @copyright (C) 2010-2014, 2600Hz INC
+%%% @copyright (C) 2010-2015, 2600Hz INC
 %%% @doc
 %%% Manage CouchDB connections
 %%% @end
@@ -33,9 +33,10 @@
 -export([save_doc/2, save_doc/3
          ,save_docs/2, save_docs/3
          ,open_cache_doc/2, open_cache_doc/3
+         ,update_cache_doc/3
          ,flush_cache_doc/2, flush_cache_doc/3
          ,flush_cache_docs/0, flush_cache_docs/1
-         ,cache_db_doc/3
+         ,add_to_doc_cache/3
          ,open_doc/2, admin_open_doc/2
          ,open_doc/3, admin_open_doc/3
          ,del_doc/2, del_docs/2
@@ -134,8 +135,8 @@ update_doc_from_file(DbName, App, File) when ?VALID_DBNAME ->
     try
         {'ok', Bin} = file:read_file(Path),
         JObj = wh_json:decode(Bin),
-        {'ok', Rev} = ?MODULE:lookup_doc_rev(DbName, wh_json:get_value(<<"_id">>, JObj)),
-        ?MODULE:save_doc(DbName, wh_json:set_value(<<"_rev">>, Rev, JObj))
+        {'ok', Rev} = ?MODULE:lookup_doc_rev(DbName, wh_doc:id(JObj)),
+        ?MODULE:save_doc(DbName, wh_doc:set_revision(JObj, Rev))
     catch
         _Type:{'badmatch',{'error',Reason}} ->
             lager:debug("bad match: ~p", [Reason]),
@@ -205,10 +206,10 @@ do_revise_docs_from_folder(DbName, Sleep, [H|T]) ->
         {'ok', Bin} = file:read_file(H),
         JObj = wh_json:decode(Bin),
         Sleep andalso timer:sleep(250),
-        case lookup_doc_rev(DbName, wh_json:get_value(<<"_id">>, JObj)) of
+        case lookup_doc_rev(DbName, wh_doc:id(JObj)) of
             {'ok', Rev} ->
                 lager:debug("update doc from file ~s in ~s", [H, DbName]),
-                save_doc(DbName, wh_json:set_value(<<"_rev">>, Rev, JObj));
+                save_doc(DbName, wh_doc:set_revision(JObj, Rev));
             {'error', 'not_found'} ->
                 lager:debug("import doc from file ~s in ~s", [H, DbName]),
                 save_doc(DbName, JObj);
@@ -239,7 +240,7 @@ do_load_fixtures_from_folder(DbName, [F|Fs]) ->
     try
         {'ok', Bin} = file:read_file(F),
         FixJObj = wh_json:decode(Bin),
-        FixId = wh_json:get_value(<<"_id">>, FixJObj),
+        FixId = wh_doc:id(FixJObj),
         case lookup_doc_rev(DbName, FixId) of
             {'ok', _Rev} ->
                 lager:debug("fixture ~s exists in ~s: ~s", [FixId, DbName, _Rev]);
@@ -520,13 +521,34 @@ open_cache_doc(DbName, DocId, Options) ->
         {'error', _}=E -> E
     end.
 
-cache_db_doc(DbName, DocId, Doc) when ?VALID_DBNAME ->
-    couch_util:cache_db_doc(DbName, DocId, Doc);
-cache_db_doc(DbName, DocId, Doc) ->
+add_to_doc_cache(DbName, DocId, Doc) when ?VALID_DBNAME ->
+    couch_util:add_to_doc_cache(DbName, DocId, Doc);
+add_to_doc_cache(DbName, DocId, Doc) ->
     case maybe_convert_dbname(DbName) of
-        {'ok', Db} -> cache_db_doc(Db, DocId, Doc);
+        {'ok', Db} -> add_to_doc_cache(Db, DocId, Doc);
         {'error', _}=E -> E
     end.
+
+-spec update_cache_doc(text(), ne_binary(), fun((wh_json:object()) -> wh_json:object() | 'skip')) ->
+                      {'ok', wh_json:object()}
+                      | couchbeam_error().
+update_cache_doc(DbName, DocId, Fun) when is_function(Fun, 1) ->
+    case open_cache_doc(DbName, DocId) of
+        {'ok', JObj} ->
+            NewJObj = Fun(JObj),
+            maybe_save_doc(DbName, NewJObj, JObj);
+        {'error', _Reason} = Else ->
+            lager:error("Can't open doc ~s/~s coz ~p", [DbName, DocId, _Reason]),
+            Else
+    end.
+
+-spec maybe_save_doc(text(), wh_json:object() | 'skip', wh_json:object()) ->
+                      {'ok', wh_json:object() | wh_json:objects()} |
+                      couchbeam_error().
+maybe_save_doc(_DbName, 'skip', Jobj) ->
+    {'ok', Jobj};
+maybe_save_doc(DbName, JObj, _OldJobj) ->
+    save_doc(DbName, JObj).
 
 -spec flush_cache_doc(ne_binary(), ne_binary() | wh_json:object()) ->
                              'ok' |
@@ -981,7 +1003,7 @@ archive(Db, File, MaxDocs, N, Pos) ->
 
 -spec archive_docs(file:io_device(), wh_json:objects()) -> 'ok'.
 archive_docs(File, Docs) ->
-    [archive_doc(File, wh_json:get_value(<<"doc">>, D)) || D <- Docs],
+    _ = [archive_doc(File, wh_json:get_value(<<"doc">>, D)) || D <- Docs],
     'ok'.
 
 -spec archive_doc(file:io_device(), wh_json:object()) -> 'ok'.

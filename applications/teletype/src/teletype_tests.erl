@@ -56,7 +56,7 @@ voicemail_to_email(AccountId, VMBox) ->
             ,{<<"To-Realm">>, <<"TestToRealm">>}
             ,{<<"Account-DB">>, wh_util:format_account_id(AccountId, 'encoded')}
             ,{<<"Account-ID">>, AccountId}
-            ,{<<"Voicemail-Box">>, wh_json:get_first_defined([<<"_id">>, <<"id">>], VMBox)}
+            ,{<<"Voicemail-Box">>, wh_doc:id(VMBox)}
             ,{<<"Voicemail-Name">>, MediaId}
             ,{<<"Caller-ID-Number">>, <<"CallerIdNumber">>}
             ,{<<"Caller-ID-Name">>, <<"CallerIdName">>}
@@ -67,7 +67,7 @@ voicemail_to_email(AccountId, VMBox) ->
            ],
     whapps_util:amqp_pool_collect(Prop
                                   ,fun wapi_notifications:publish_voicemail/1
-                                  ,5000
+                                  ,5 * ?MILLISECONDS_IN_SECOND
                                  ).
 skel(AccountId) ->
     AccountDb = wh_util:format_account_id(AccountId, 'encoded'),
@@ -91,7 +91,7 @@ find_user_for_skel(AccountId, [User|Users]) ->
 
 find_user_for_skel(AccountId, User, Users, PotentialEmail) ->
     case binary:split(PotentialEmail, <<"@">>) of
-        [_U, _D] -> skel(AccountId, wh_json:get_value(<<"id">>, User));
+        [_U, _D] -> skel(AccountId, wh_doc:id(User));
         _ -> find_user_for_skel(AccountId, Users)
     end.
 
@@ -117,7 +117,7 @@ voicemail_full(AccountId, Box) ->
     AccountDb = wh_util:format_account_id(AccountId, 'encoded'),
     Props = [{<<"Account-DB">>, AccountDb}
              ,{<<"Account-ID">>, AccountId}
-             ,{<<"Voicemail-Box">>, wh_json:get_value(<<"_id">>, Box)}
+             ,{<<"Voicemail-Box">>, wh_doc:id(Box)}
              ,{<<"Voicemail-Number">>, wh_json:get_value(<<"mailbox">>, Box)}
              ,{<<"Max-Message-Count">>, 1}
              ,{<<"Message-Count">>, 2}
@@ -126,7 +126,7 @@ voicemail_full(AccountId, Box) ->
             ],
     wh_amqp_worker:call_collect(Props
                                 ,fun wapi_notifications:publish_voicemail_full/1
-                                ,5000
+                                ,5 * ?MILLISECONDS_IN_SECOND
                                ).
 
 fax_inbound_to_email(AccountId) ->
@@ -151,14 +151,14 @@ fax_inbound_to_email(AccountId, <<_/binary>> = FaxId) ->
     fax_inbound_to_email(AccountId, Fax);
 fax_inbound_to_email(AccountId, Fax) ->
     Message = props:filter_undefined(
-                [{<<"Fax-ID">>, wh_json:get_value(<<"_id">>, Fax)}
+                [{<<"Fax-ID">>, wh_doc:id(Fax)}
                  ,{<<"Owner-ID">>, wh_json:get_value(<<"owner_id">>, Fax)}
                  ,{<<"FaxBox-ID">>, wh_json:get_value(<<"faxbox_id">>, Fax)}
                  ,{<<"Account-ID">>, AccountId}
                  | notify_fields(Fax)
                 ]),
-    lager:debug("publishing fax inbound to email req for ~s/~s", [AccountId, wh_json:get_value(<<"_id">>, Fax)]),
-    wh_amqp_worker:call_collect(Message, fun wapi_notifications:publish_fax_inbound/1, 2000).
+    lager:debug("publishing fax inbound to email req for ~s/~s", [AccountId, wh_doc:id(Fax)]),
+    wh_amqp_worker:call_collect(Message, fun wapi_notifications:publish_fax_inbound/1, 2 * ?MILLISECONDS_IN_SECOND).
 
 -spec notify_fields(wh_json:object()) -> wh_proplist().
 notify_fields(JObj) ->

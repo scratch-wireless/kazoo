@@ -35,58 +35,75 @@ init() ->
     {'ok', _} = notify_util:compile_default_subject_template(?DEFAULT_SUBJ_TMPL, ?MOD_CONFIG_CAT),
     lager:debug("init done for ~s", [?MODULE]).
 
+-spec stop_processing(string(), list()) -> no_return().
+stop_processing(Format, Args) ->
+    lager:debug(Format, Args),
+    throw('stop').
+
 -spec handle_req(wh_json:object(), wh_proplist()) -> any().
 handle_req(JObj, _Props) ->
     'true' = wapi_notifications:voicemail_v(JObj),
-    _ = whapps_util:put_callid(JObj),
+    _ = wh_util:put_callid(JObj),
 
     lager:debug("new voicemail left, sending to email if enabled"),
 
     RespQ = wh_json:get_value(<<"Server-ID">>, JObj),
     MsgId = wh_json:get_value(<<"Msg-ID">>, JObj),
-    AcctDB = wh_json:get_value(<<"Account-DB">>, JObj),
+    AccountDb = wh_json:get_value(<<"Account-DB">>, JObj),
 
-    lager:debug("loading vm box ~s", [wh_json:get_value(<<"Voicemail-Box">>, JObj)]),
-    {'ok', VMBox} = couch_mgr:open_cache_doc(AcctDB, wh_json:get_value(<<"Voicemail-Box">>, JObj)),
+    VMBoxId = wh_json:get_value(<<"Voicemail-Box">>, JObj),
+    lager:debug("loading vm box ~s", [VMBoxId]),
+    {'ok', VMBox} = couch_mgr:open_cache_doc(AccountDb, VMBoxId),
 
-    lager:debug("loading owner ~s", [wh_json:get_value(<<"owner_id">>, VMBox)]),
-    {'ok', UserJObj} = couch_mgr:open_cache_doc(AcctDB, wh_json:get_value(<<"owner_id">>, VMBox)),
+    {'ok', UserJObj} = get_owner(AccountDb, VMBox),
 
-    case {wh_json:get_ne_value(<<"email">>, UserJObj), wh_json:is_true(<<"vm_to_email_enabled">>, UserJObj)} of
-        {'undefined', _} ->
-            lager:debug("no email found for user ~s", [wh_json:get_value(<<"username">>, UserJObj)]);
-        {_Email, 'false'} ->
-            lager:debug("voicemail to email disabled for ~s", [_Email]);
-        {Email, 'true'} ->
-            'ok' = notify_util:send_update(RespQ, MsgId, <<"pending">>),
-            lager:debug("VM->Email enabled for user, sending to ~s", [Email]),
-            {'ok', AcctObj} = couch_mgr:open_cache_doc(AcctDB, wh_util:format_account_id(AcctDB, 'raw')),
-            Docs = [VMBox, UserJObj, AcctObj],
+    BoxEmails = kzd_voicemail_box:notification_emails(VMBox),
 
-            Emails = [Email | email_list(wh_json:get_value(<<"notify_email_address">>, VMBox, []))],
+    %% If the box has emails, continue processing
+    %% or If the voicemail notification is enabled on the user, continue processing
+    %% otherwise stop processing
+    (BoxEmails =/= [] orelse kzd_user:voicemail_notification_enabled(UserJObj))
+        orelse stop_processing("box ~s has no emails or owner doesn't want emails", [VMBoxId]),
 
-            Props = [{<<"email_address">>, Emails}
-                     | create_template_props(JObj, Docs, AcctObj)
-                    ],
+    Emails = maybe_add_user_email(BoxEmails, kzd_user:email(UserJObj)),
 
-            CustomTxtTemplate = wh_json:get_value(?EMAIL_TXT_TEMPLATE_KEY, AcctObj),
-            {'ok', TxtBody} = notify_util:render_template(CustomTxtTemplate, ?DEFAULT_TEXT_TMPL, Props),
+    'ok' = notify_util:send_update(RespQ, MsgId, <<"pending">>),
+    lager:debug("VM->Email enabled for user, sending to ~p", [Emails]),
+    {'ok', AccountJObj} = kz_account:fetch(AccountDb),
+    Docs = [VMBox, UserJObj, AccountJObj],
 
-            CustomHtmlTemplate = wh_json:get_value(?EMAIL_HTML_TEMPLATE_KEY, AcctObj),
-            {'ok', HTMLBody} = notify_util:render_template(CustomHtmlTemplate, ?DEFAULT_HTML_TMPL, Props),
+    Props = [{<<"email_address">>, Emails}
+             | create_template_props(JObj, Docs, AccountJObj)
+            ],
 
-            CustomSubjectTemplate = wh_json:get_value(?EMAIL_SUBJECT_TEMPLATE_KEY, AcctObj),
-            {'ok', Subject} = notify_util:render_template(CustomSubjectTemplate, ?DEFAULT_SUBJ_TMPL, Props),
+    CustomTxtTemplate = wh_json:get_value(?EMAIL_TXT_TEMPLATE_KEY, AccountJObj),
+    {'ok', TxtBody} = notify_util:render_template(CustomTxtTemplate, ?DEFAULT_TEXT_TMPL, Props),
 
-            build_and_send_email(TxtBody, HTMLBody, Subject, Emails
-                                 ,props:filter_undefined(Props)
-                                 ,{RespQ, MsgId}
-                                )
-    end.
+    CustomHtmlTemplate = wh_json:get_value(?EMAIL_HTML_TEMPLATE_KEY, AccountJObj),
+    {'ok', HTMLBody} = notify_util:render_template(CustomHtmlTemplate, ?DEFAULT_HTML_TMPL, Props),
 
--spec email_list(binary() | binaries()) -> binaries().
-email_list(Email) when is_binary(Email) -> [Email];
-email_list(Email) when is_list(Email) -> Email.
+    CustomSubjectTemplate = wh_json:get_value(?EMAIL_SUBJECT_TEMPLATE_KEY, AccountJObj),
+    {'ok', Subject} = notify_util:render_template(CustomSubjectTemplate, ?DEFAULT_SUBJ_TMPL, Props),
+
+    build_and_send_email(TxtBody, HTMLBody, Subject, Emails
+                         ,props:filter_undefined(Props)
+                         ,{RespQ, MsgId}
+                        ).
+
+-spec maybe_add_user_email(ne_binaries(), api_binary()) -> ne_binaries().
+maybe_add_user_email(BoxEmails, 'undefined') -> BoxEmails;
+maybe_add_user_email(BoxEmails, UserEmail) -> [UserEmail | BoxEmails].
+
+-spec get_owner(ne_binary(), kzd_voicemail_box:doc(), api_binary()) ->
+                       {'ok', kzd_user:doc()}.
+get_owner(AccountDb, VMBox) ->
+    get_owner(AccountDb, VMBox, kzd_voicemail_box:owner_id(VMBox)).
+get_owner(_AccountDb, _VMBox, 'undefined') ->
+    lager:debug("no owner of voicemail box ~s, using empty owner", [wh_doc:id(_VMBox)]),
+    {'ok', wh_json:new()};
+get_owner(AccountDb, _VMBox, OwnerId) ->
+    lager:debug("attempting to load owner: ~s", [OwnerId]),
+    {'ok', _} = couch_mgr:open_cache_doc(AccountDb, OwnerId).
 
 %%--------------------------------------------------------------------
 %% @private
@@ -125,7 +142,7 @@ create_template_props(Event, Docs, Account) ->
                            ,{<<"call_id">>, wh_json:get_value(<<"Call-ID">>, Event)}
                            ,{<<"magic_hash">>, magic_hash(Event)}
                           ])}
-     ,{<<"account_db">>, wh_json:get_value(<<"pvt_account_db">>, Account)}
+     ,{<<"account_db">>, wh_doc:account_db(Account)}
     ].
 
 -spec magic_hash(wh_json:object()) -> api_binary().
@@ -274,8 +291,8 @@ mime_to_extension(_) -> <<"wav">>.
 preaty_print_length('undefined') ->
     <<"00:00">>;
 preaty_print_length(Milliseconds) when is_integer(Milliseconds) ->
-    Seconds = round(Milliseconds / 1000) rem 60,
-    Minutes = trunc(Milliseconds / (1000*60)) rem 60,
+    Seconds = round(Milliseconds / ?MILLISECONDS_IN_SECOND) rem 60,
+    Minutes = trunc(Milliseconds / ?MILLISECONDS_IN_MINUTE) rem 60,
     wh_util:to_binary(io_lib:format("~2..0w:~2..0w", [Minutes, Seconds]));
 preaty_print_length(Event) ->
     preaty_print_length(wh_json:get_integer_value(<<"Voicemail-Length">>, Event)).

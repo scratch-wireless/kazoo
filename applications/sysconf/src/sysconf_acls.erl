@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%%% @copyright (C) 2012-2014, 2600Hz INC
+%%% @copyright (C) 2012-2015, 2600Hz INC
 %%% @doc
 %%%
 %%% @end
@@ -15,7 +15,7 @@
 
 -include("sysconf.hrl").
 
--define(REQUEST_TIMEOUT, whapps_config:get_integer(?APP_NAME, <<"acl_request_timeout_ms">>, 2000)).
+-define(REQUEST_TIMEOUT, whapps_config:get_integer(?APP_NAME, <<"acl_request_timeout_ms">>, 2 * ?MILLISECONDS_IN_SECOND)).
 -define(REQUEST_TIMEOUT_FUDGE, whapps_config:get_integer(?APP_NAME, <<"acl_request_timeout_fudge_ms">>, 100)).
 -define(IP_REGEX, <<"^(\\d{1,3}\\\.\\d{1,3}\\\.\\d{1,3}\\\.\\d{1,3}).*">>).
 -define(ACL_RESULT(IP, ACL), {'acl', IP, ACL}).
@@ -153,7 +153,7 @@ maybe_capture_ip(Collector, CaptureMe, JObj, ACLBuilderFun) ->
 -spec handle_sip_auth_result(pid(), wh_json:object(), ne_binaries()) -> 'ok'.
 handle_sip_auth_result(Collector, JObj, IPs) ->
     AccountId = wh_json:get_value([<<"value">>, <<"account_id">>], JObj),
-    AuthorizingId = wh_json:get_value(<<"id">>, JObj),
+    AuthorizingId = wh_doc:id(JObj),
     AuthorizingType = wh_json:get_value([<<"value">>, <<"authorizing_type">>], JObj),
     add_trusted_objects(Collector, AccountId, AuthorizingId, AuthorizingType, IPs).
 
@@ -179,7 +179,7 @@ offnet_resources(Collector) ->
 
 -spec handle_resource_results(pid(), wh_json:objects()) -> 'ok'.
 handle_resource_results(Collector, JObjs) ->
-    [handle_resource_result(Collector, JObj) || JObj <- JObjs],
+    _ = [handle_resource_result(Collector, JObj) || JObj <- JObjs],
     'ok'.
 
 -spec handle_resource_result(pid(), wh_json:object()) -> 'ok'.
@@ -191,7 +191,7 @@ handle_resource_result(Collector, JObj) ->
 
 -spec handle_resource_result(pid(), wh_json:object(), ne_binaries()) -> 'ok'.
 handle_resource_result(Collector, JObj, IPs) ->
-    AuthorizingId = wh_json:get_first_defined([<<"_id">>, <<"id">>], JObj),
+    AuthorizingId = wh_doc:id(JObj),
     add_trusted_objects(Collector, 'undefined', AuthorizingId, <<"resource">>, IPs).
 
 -spec resource_inbound_ips(pid(), wh_json:object()) -> pid_refs().

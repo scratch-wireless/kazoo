@@ -58,6 +58,7 @@
 -export([uri_encode/1
          ,uri_decode/1
          ,resolve_uri/2
+         ,normalize_amqp_uri/1
         ]).
 
 -export([uri/2]).
@@ -72,6 +73,7 @@
 
 -export([current_tstamp/0, current_unix_tstamp/0
          ,gregorian_seconds_to_unix_seconds/1, unix_seconds_to_gregorian_seconds/1
+         ,unix_timestamp_to_gregorian_seconds/1
          ,pretty_print_datetime/1
          ,rfc1036/1, rfc1036/2
          ,iso8601/1
@@ -86,6 +88,7 @@
         ]).
 
 -export([put_callid/1, get_callid/0
+         ,spawn/1, spawn/3
          ,set_startup/0, startup/0
         ]).
 -export([get_event_type/1]).
@@ -103,6 +106,11 @@
 -export([format_datetime/0, format_datetime/1]).
 
 -export([node_name/0, node_hostname/0]).
+
+-export([write_file/2, write_file/3
+         ,delete_file/1
+         ,make_dir/1
+        ]).
 
 -include_lib("kernel/include/inet.hrl").
 
@@ -134,7 +142,7 @@ log_stacktrace_mfa(M, F, Arity, Info) when is_integer(Arity) ->
     lager:info("st: ~s:~s/~b at (~b)", [M, F, Arity, props:get_value('line', Info, 0)]);
 log_stacktrace_mfa(M, F, Args, Info) ->
     lager:info("st: ~s:~s at ~p", [M, F, props:get_value('line', Info, 0)]),
-    [lager:info("args: ~p", [Arg]) || Arg <- Args],
+    _ = [lager:info("args: ~p", [Arg]) || Arg <- Args],
     'ok'.
 
 -define(LOG_LEVELS, ['emergency'
@@ -187,7 +195,7 @@ change_syslog_log_level(L) ->
 -type account_format() :: 'unencoded' | 'encoded' | 'raw'.
 -spec format_account_id(ne_binaries() | api_binary() | wh_json:object()) -> api_binary().
 -spec format_account_id(ne_binaries() | api_binary() | wh_json:object(), account_format()) -> api_binary().
--spec format_account_id(ne_binaries() | api_binary(), wh_year(), wh_month()) -> api_binary().
+-spec format_account_id(ne_binaries() | api_binary(), wh_year() | ne_binary(), wh_month() | ne_binary()) -> api_binary().
 
 format_account_id(Doc) -> format_account_id(Doc, 'unencoded').
 
@@ -244,7 +252,8 @@ format_account_id(AccountId, Year, Month) when not is_integer(Year) ->
     format_account_id(AccountId, to_integer(Year), Month);
 format_account_id(AccountId, Year, Month) when not is_integer(Month) ->
     format_account_id(AccountId, Year, to_integer(Month));
-format_account_id(Account, Year, Month) when is_integer(Year), is_integer(Month) ->
+format_account_id(Account, Year, Month) when is_integer(Year),
+                                             is_integer(Month) ->
     AccountId = format_account_id(Account, 'raw'),
     <<(format_account_id(AccountId, 'encoded'))/binary
       ,"-"
@@ -254,7 +263,7 @@ format_account_id(Account, Year, Month) when is_integer(Year), is_integer(Month)
 
 -spec format_account_mod_id(ne_binary()) -> ne_binary().
 -spec format_account_mod_id(ne_binary(), gregorian_seconds() | wh_now()) -> ne_binary().
--spec format_account_mod_id(ne_binary(), wh_year(), wh_month()) -> ne_binary().
+-spec format_account_mod_id(ne_binary(), wh_year() | ne_binary(), wh_month() | ne_binary()) -> ne_binary().
 format_account_mod_id(Account) ->
     format_account_mod_id(Account, os:timestamp()).
 
@@ -307,8 +316,7 @@ is_in_account_hierarchy(_, 'undefined', _) -> 'false';
 is_in_account_hierarchy(CheckFor, InAccount, IncludeSelf) ->
     CheckId = wh_util:format_account_id(CheckFor, 'raw'),
     AccountId = wh_util:format_account_id(InAccount, 'raw'),
-    AccountDb = wh_util:format_account_id(InAccount, 'encoded'),
-    case (IncludeSelf andalso AccountId =:= CheckId) orelse couch_mgr:open_cache_doc(AccountDb, AccountId) of
+    case (IncludeSelf andalso AccountId =:= CheckId) orelse kz_account:fetch(AccountId) of
         'true' ->
             lager:debug("account ~s is the same as the account to fetch the hierarchy from", [CheckId]),
             'true';
@@ -336,9 +344,7 @@ is_in_account_hierarchy(CheckFor, InAccount, IncludeSelf) ->
 -spec is_system_admin(api_binary()) -> boolean().
 is_system_admin('undefined') -> 'false';
 is_system_admin(Account) ->
-    AccountId = wh_util:format_account_id(Account, 'raw'),
-    AccountDb = wh_util:format_account_id(Account, 'encoded'),
-    case couch_mgr:open_cache_doc(AccountDb, AccountId) of
+    case kz_account:fetch(Account) of
         {'ok', JObj} -> kz_account:is_superduper_admin(JObj);
         {'error', _R} ->
             lager:debug("unable to open account definition for ~s: ~p", [Account, _R]),
@@ -361,11 +367,9 @@ is_system_db(Db) ->
 -spec is_account_enabled(api_binary()) -> boolean().
 is_account_enabled('undefined') -> 'false';
 is_account_enabled(Account) ->
-    AccountId = wh_util:format_account_id(Account, 'raw'),
-    AccountDb = wh_util:format_account_id(Account, 'encoded'),
-    case couch_mgr:open_cache_doc(AccountDb, AccountId) of
+    case kz_account:fetch(Account) of
         {'error', _E} ->
-            lager:error("could not open account ~p in ~p", [AccountId, AccountDb]),
+            lager:error("could not open account ~s", [Account]),
             'false';
         {'ok', JObj} ->
             kz_account:is_enabled(JObj)
@@ -376,9 +380,7 @@ is_account_enabled(Account) ->
 -spec is_account_expired(api_binary()) -> boolean().
 is_account_expired('undefined') -> 'false';
 is_account_expired(Account) ->
-    AccountId = wh_util:format_account_id(Account, 'raw'),
-    AccountDb = wh_util:format_account_id(Account, 'encoded'),
-    case couch_mgr:open_cache_doc(AccountDb, AccountId) of
+    case kz_account:fetch(Account) of
         {'ok', Doc} ->
             Now = wh_util:current_tstamp(),
             Trial = wh_json:get_integer_value(<<"pvt_trial_expires">>, Doc, Now+1),
@@ -521,6 +523,22 @@ callid(Prop) when is_list(Prop) ->
     props:get_first_defined([<<"Call-ID">>, <<"Msg-ID">>], Prop, ?LOG_SYSTEM_ID);
 callid(JObj) ->
     wh_json:get_first_defined([<<"Call-ID">>, <<"Msg-ID">>], JObj, ?LOG_SYSTEM_ID).
+
+%% @public
+-spec spawn(fun(() -> any())) -> pid().
+-spec spawn(atom(), atom(), list()) -> pid().
+spawn(Module, Function, Arguments) ->
+    CallId = get_callid(),
+    erlang:spawn(fun () ->
+                         _ = put_callid(CallId),
+                         erlang:apply(Module, Function, Arguments)
+                 end).
+spawn(Fun) ->
+    CallId = get_callid(),
+    erlang:spawn(fun() ->
+                         _ = put_callid(CallId),
+                         Fun()
+                 end).
 
 -spec set_startup() -> 'undefined' | gregorian_seconds().
 set_startup() ->
@@ -999,7 +1017,7 @@ whistle_version() ->
     case file:open(VersionFile, ['read']) of
         {'ok', File} ->
             {'ok', Line} = file:read_line(File),
-            file:close(File),
+            _ = file:close(File),
             wh_util:to_binary(string:strip(Line, 'right', $\n));
         _ -> <<"unknown">>
     end.
@@ -1023,6 +1041,10 @@ gregorian_seconds_to_unix_seconds(GregorianSeconds) ->
 -spec unix_seconds_to_gregorian_seconds(integer() | string() | binary()) -> integer().
 unix_seconds_to_gregorian_seconds(UnixSeconds) ->
     to_integer(UnixSeconds) + ?UNIX_EPOCH_IN_GREGORIAN.
+
+-spec unix_timestamp_to_gregorian_seconds(integer() | string() | binary()) -> integer().
+unix_timestamp_to_gregorian_seconds(UnixTimestamp) ->
+    ?UNIX_EPOCH_IN_GREGORIAN + (to_integer(UnixTimestamp) div 1000).
 
 -spec pretty_print_datetime(wh_datetime() | integer()) -> ne_binary().
 pretty_print_datetime(Timestamp) when is_integer(Timestamp) ->
@@ -1116,7 +1138,7 @@ decr_timeout(Timeout, Start) ->
 
 -spec microseconds_to_seconds(float() | integer() | string() | binary()) -> non_neg_integer().
 microseconds_to_seconds(Microseconds) -> to_integer(Microseconds) div 1000000.
-milliseconds_to_seconds(Milliseconds) -> to_integer(Milliseconds) div 1000.
+milliseconds_to_seconds(Milliseconds) -> to_integer(Milliseconds) div ?MILLISECONDS_IN_SECOND.
 
 -spec elapsed_s(wh_now() | pos_integer()) -> pos_integer().
 -spec elapsed_ms(wh_now() | pos_integer()) -> pos_integer().
@@ -1138,10 +1160,10 @@ elapsed_s({_,_,_}=Start, Now) -> elapsed_s(now_s(Start), Now);
 elapsed_s(Start, {_,_,_}=Now) -> elapsed_s(Start, now_s(Now));
 elapsed_s(Start, Now) when is_integer(Start), is_integer(Now) -> Now - Start.
 
-elapsed_ms({_,_,_}=Start, {_,_,_}=Now) -> timer:now_diff(Now, Start) div 1000;
+elapsed_ms({_,_,_}=Start, {_,_,_}=Now) -> timer:now_diff(Now, Start) div ?MILLISECONDS_IN_SECOND;
 elapsed_ms({_,_,_}=Start, Now) -> elapsed_ms(now_s(Start), Now);
 elapsed_ms(Start, {_,_,_}=Now) -> elapsed_ms(Start, now_s(Now));
-elapsed_ms(Start, Now) when is_integer(Start), is_integer(Now) -> (Now - Start) * 1000.
+elapsed_ms(Start, Now) when is_integer(Start), is_integer(Now) -> (Now - Start) * 1 * ?MILLISECONDS_IN_SECOND.
 
 elapsed_us({_,_,_}=Start, {_,_,_}=Now) -> timer:now_diff(Now, Start);
 elapsed_us({_,_,_}=Start, Now) -> elapsed_us(now_s(Start), Now);
@@ -1153,7 +1175,7 @@ elapsed_us(Start, Now) when is_integer(Start), is_integer(Now) -> (Now - Start) 
 -spec now_us(wh_now()) -> pos_integer().
 now_us({MegaSecs,Secs,MicroSecs}) ->
     (MegaSecs*1000000 + Secs)*1000000 + MicroSecs.
-now_ms({_,_,_}=Now) -> now_us(Now) div 1000.
+now_ms({_,_,_}=Now) -> now_us(Now) div ?MILLISECONDS_IN_SECOND.
 now_s({_,_,_}=Now) -> unix_seconds_to_gregorian_seconds(now_us(Now) div 1000000).
 
 -spec format_date() -> binary().
@@ -1192,11 +1214,47 @@ node_hostname() ->
     [_Name, Host] = binary:split(to_binary(node()), <<"@">>),
     Host.
 
+
+%% @public
+-spec write_file(file:name(), iodata()) -> 'ok'.
+write_file(Filename, Bytes) ->
+    write_file(Filename, Bytes, []).
+
+%% @public
+-spec write_file(file:name(), iodata(), [file:mode()]) -> 'ok'.
+write_file(Filename, Bytes, Modes) ->
+    case file:write_file(Filename, Bytes, Modes) of
+        'ok' -> 'ok';
+        {'error', _}=_E ->
+            lager:debug("writing file ~s (~p) failed : ~p", [Filename, Modes, _E])
+    end.
+
+%% @public
+-spec delete_file(file:name()) -> 'ok'.
+delete_file(Filename) ->
+    case file:delete(Filename) of
+        'ok' -> 'ok';
+        {'error', _}=_E ->
+            lager:debug("deleting file ~s failed : ~p", [Filename, _E])
+    end.
+
+%% @public
+-spec make_dir(file:name()) -> 'ok'.
+make_dir(Filename) ->
+    case file:make_dir(Filename) of
+        'ok' -> 'ok';
+        {'error', _}=_E ->
+            lager:debug("creating directory ~s failed : ~p", [Filename, _E])
+    end.
+
+normalize_amqp_uri(URI) ->
+    to_binary(amqp_uri:remove_credentials(to_list(URI))).
+
 -ifdef(TEST).
 
 -include_lib("eunit/include/eunit.hrl").
 
--spec resolve_uri_test() -> any().
+-spec resolve_uri_test() -> _.
 resolve_uri_test() ->
     RawPath = <<"http://pivot/script.php">>,
     Relative = <<"script2.php">>,

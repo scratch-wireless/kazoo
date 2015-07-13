@@ -1,5 +1,5 @@
 %%%%-------------------------------------------------------------------
-%%% @copyright (C) 2012-2014, 2600Hz INC
+%%% @copyright (C) 2012-2015, 2600Hz INC
 %%% @doc
 %%% "data":{
 %%%   "pin":"1234"
@@ -70,7 +70,10 @@ try_collect_pin(Call, Pin, Retries, Interdigit) ->
         {'ok', _Digits} ->
             lager:info("caller entered bad pin: '~s'", [_Digits]),
             _ = whapps_call_command:b_prompt(<<"disa-invalid_pin">>, Call),
-            try_collect_pin(Call, Pin, Retries - 1, Interdigit)
+            try_collect_pin(Call, Pin, Retries - 1, Interdigit);
+        {'error', 'channel_hungup'} ->
+            lager:info("channel has hungup, we're done"),
+            'fail'
     end.
 
 %%--------------------------------------------------------------------
@@ -96,14 +99,14 @@ allow_dial(Data, Call, Retries, Interdigit) ->
     Number = wnm_util:to_e164(Digits),
     lager:info("caller is trying to call '~s'", [Number]),
 
-    _ = maybe_update_caller_id(Data, Call),
+    Call1 = maybe_update_caller_id(Data, Call),
 
-    maybe_route_to_callflow(Data, Call, Retries, Interdigit, Number).
+    maybe_route_to_callflow(Data, Call1, Retries, Interdigit, Number).
 
 maybe_route_to_callflow(Data, Call, Retries, Interdigit, Number) ->
     case cf_util:lookup_callflow(Number, whapps_call:account_id(Call)) of
         {'ok', Flow, NoMatch} ->
-            lager:info("callflow ~s satisfies request", [wh_json:get_value(<<"_id">>, Flow)]),
+            lager:info("callflow ~s satisfies request", [wh_doc:id(Flow)]),
             Updates = [{fun whapps_call:set_request/2
                         ,list_to_binary([Number, "@", whapps_call:request_realm(Call)])
                        }
@@ -142,11 +145,11 @@ maybe_restrict_call(Data, Call, Number, Flow) ->
             cf_exe:branch(wh_json:get_value(<<"flow">>, Flow), Call)
     end.
 
--spec maybe_update_caller_id(wh_json:object(), whapps_call:call()) -> 'ok'.
+-spec maybe_update_caller_id(wh_json:object(), whapps_call:call()) -> whapps_call:call().
 maybe_update_caller_id(Data, Call) ->
     case wh_json:is_true(<<"use_account_caller_id">>, Data, 'false') of
         'true' -> set_caller_id(Call);
-        'false' -> 'ok'
+        'false' -> Call
     end.
 
 -spec start_preconnect_audio(wh_json:object(), whapps_call:call()) -> 'ok'.
@@ -194,26 +197,20 @@ play_ringing(Data, Call) ->
 %% @doc
 %% @end
 %%--------------------------------------------------------------------
--spec set_caller_id(whapps_call:call()) -> 'ok'.
+-spec set_caller_id(whapps_call:call()) -> whapps_call:call().
 set_caller_id(Call) ->
-    CIDNum = whapps_call:caller_id_number(Call),
-    case wh_number_manager:lookup_account_by_number(CIDNum) of
-        {'ok', AccountId, _} ->
-            {Number, Name} = maybe_get_account_cid(AccountId, Call),
-            lager:info("setting the caller id number to ~s from account ~s", [Number, AccountId]),
-            Updates = [fun(C) -> whapps_call:kvs_store('dynamic_cid', Number, C) end
-                       ,fun(C) ->
-                                C1 = whapps_call:set_caller_id_number(Number, C),
-                                whapps_call:set_caller_id_name(Name, C1)
-                        end
-                      ],
-            {'ok', C} = cf_exe:get_call(Call),
-            cf_exe:set_call(whapps_call:exec(Updates, C)),
-            'ok';
-        _Else ->
-            lager:debug("~s is not associated with any account, ~s", [CIDNum]),
-            'ok'
-    end.
+    AccountId = whapps_call:account_id(Call),
+    {Number, Name} = maybe_get_account_cid(AccountId, Call),
+    lager:info("setting the caller id number to ~s from account ~s", [Number, AccountId]),
+    Updates = [fun(C) -> whapps_call:kvs_store('dynamic_cid', Number, C) end
+               ,fun(C) ->
+                        C1 = whapps_call:set_caller_id_number(Number, C),
+                        whapps_call:set_caller_id_name(Name, C1)
+                end
+              ],
+    UpdatedCall = whapps_call:exec(Updates, Call),
+    cf_exe:set_call(UpdatedCall),
+    UpdatedCall.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -225,11 +222,9 @@ set_caller_id(Call) ->
 maybe_get_account_cid(AccountId, Call) ->
     Name = whapps_call:caller_id_name(Call),
     Number = whapps_call:caller_id_number(Call),
-    AccountDb = wh_util:format_account_id(AccountId, 'encoded'),
-    case couch_mgr:open_cache_doc(AccountDb, AccountId) of
+    case kz_account:fetch(AccountId) of
         {'error', _} -> cf_attributes:maybe_get_assigned_number(Number, Name, Call);
-        {'ok', JObj} ->
-            maybe_get_account_external_number(Number, Name, JObj, Call)
+        {'ok', JObj} -> maybe_get_account_external_number(Number, Name, JObj, Call)
     end.
 
 %%--------------------------------------------------------------------
@@ -277,9 +272,7 @@ should_restrict_call(Data, Call, Number) ->
 %%--------------------------------------------------------------------
 -spec should_restrict_call_by_account(whapps_call:call(), ne_binary()) -> boolean().
 should_restrict_call_by_account(Call, Number) ->
-    AccountId = whapps_call:account_id(Call),
-    AccountDb = whapps_call:account_db(Call),
-    case couch_mgr:open_cache_doc(AccountDb, AccountId) of
+    case kz_account:fetch(whapps_call:account_id(Call)) of
         {'error', _} -> 'false';
         {'ok', JObj} ->
             Classification = wnm_util:classify_number(Number),

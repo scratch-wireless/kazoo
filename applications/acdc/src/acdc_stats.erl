@@ -1,17 +1,18 @@
 %%%-------------------------------------------------------------------
-%%% @copyright (C) 2012-2014, 2600Hz
+%%% @copyright (C) 2012-2015, 2600Hz
 %%% @doc
 %%% Collector of stats
 %%% @end
 %%% @contributors
 %%%   James Aimonetti
+%%%   KAZOO-3596: Sponsored by GTNetwork LLC, implemented by SIPLABS LLC
 %%%-------------------------------------------------------------------
 -module(acdc_stats).
 
 -behaviour(gen_listener).
 
 %% Public API
--export([call_waiting/5
+-export([call_waiting/6
          ,call_abandoned/4
          ,call_handled/4
          ,call_missed/5
@@ -60,7 +61,14 @@
 -include("acdc_stats.hrl").
 
 %% Public API
-call_waiting(AccountId, QueueId, CallId, CallerIdName, CallerIdNumber) ->
+-spec call_waiting(api_binary()
+                   ,api_binary()
+                   ,api_binary()
+                   ,api_binary()
+                   ,api_binary()
+                   ,api_binary()
+                  ) -> 'ok' | {'error', any()}.
+call_waiting(AccountId, QueueId, CallId, CallerIdName, CallerIdNumber, CallerPriority) ->
     Prop = props:filter_undefined(
              [{<<"Account-ID">>, AccountId}
               ,{<<"Queue-ID">>, QueueId}
@@ -68,6 +76,7 @@ call_waiting(AccountId, QueueId, CallId, CallerIdName, CallerIdNumber) ->
               ,{<<"Caller-ID-Name">>, CallerIdName}
               ,{<<"Caller-ID-Number">>, CallerIdNumber}
               ,{<<"Entered-Timestamp">>, wh_util:current_tstamp()}
+              ,{<<"Caller-Priority">>, CallerPriority}
               | wh_api:default_headers(?APP_NAME, ?APP_VERSION)
              ]),
     whapps_util:amqp_pool_send(Prop, fun wapi_acdc_stats:publish_call_waiting/1).
@@ -240,6 +249,7 @@ call_table_opts() ->
                        ,[{<<"acdc_status_stat">>, <<"ready">>}
                          ,{<<"acdc_status_stat">>, <<"logged_in">>}
                          ,{<<"acdc_status_stat">>, <<"logged_out">>}
+                         ,{<<"acdc_status_stat">>, <<"pending_logged_out">>}
                          ,{<<"acdc_status_stat">>, <<"connecting">>}
                          ,{<<"acdc_status_stat">>, <<"connected">>}
                          ,{<<"acdc_status_stat">>, <<"wrapup">>}
@@ -309,7 +319,7 @@ find_call(CallId) ->
          }).
 
 init([]) ->
-    put('callid', <<"acdc.stats">>),
+    wh_util:put_callid(<<"acdc.stats">>),
     couch_mgr:suppress_change_notice(),
     lager:debug("started new acdc stats collector"),
 
@@ -409,7 +419,7 @@ call_build_match_spec(JObj) ->
         'undefined' ->
             {'error', wh_json:from_list([{<<"Account-ID">>, <<"missing but required">>}])};
         AccountId ->
-            AccountMatch = {#call_stat{acct_id='$1', _='_'}
+            AccountMatch = {#call_stat{account_id='$1', _='_'}
                          ,[{'=:=', '$1', {'const', AccountId}}]
                         },
             call_build_match_spec(JObj, AccountMatch)
@@ -529,14 +539,14 @@ query_calls(RespQ, MsgId, Match, _Limit) ->
 -spec archive_data() -> 'ok'.
 archive_data() ->
     Self = self(),
-    _ = spawn(?MODULE, 'archive_call_data', [Self, 'false']),
-    _ = spawn('acdc_agent_stats', 'archive_status_data', [Self, 'false']),
+    _ = wh_util:spawn(?MODULE, 'archive_call_data', [Self, 'false']),
+    _ = wh_util:spawn('acdc_agent_stats', 'archive_status_data', [Self, 'false']),
     'ok'.
 
 force_archive_data() ->
     Self = self(),
-    _ = spawn(?MODULE, 'archive_call_data', [Self, 'true']),
-    _ = spawn('acdc_agent_stats', 'archive_status_data', [Self, 'true']),
+    _ = wh_util:spawn(?MODULE, 'archive_call_data', [Self, 'true']),
+    _ = wh_util:spawn('acdc_agent_stats', 'archive_status_data', [Self, 'true']),
     'ok'.
 
 cleanup_data(Srv) ->
@@ -578,7 +588,7 @@ cleanup_unfinished(Unfinished) ->
     lager:debug("unfinished stats: ~p", [Unfinished]).
 
 archive_call_data(Srv, 'true') ->
-    put('callid', <<"acdc_stats.force_call_archiver">>),
+    wh_util:put_callid(<<"acdc_stats.force_call_archiver">>),
 
     Match = [{#call_stat{status='$1'
                          ,is_archived='$2'
@@ -592,7 +602,7 @@ archive_call_data(Srv, 'true') ->
              }],
     maybe_archive_call_data(Srv, Match);
 archive_call_data(Srv, 'false') ->
-    put('callid', <<"acdc_stats.call_archiver">>),
+    wh_util:put_callid(<<"acdc_stats.call_archiver">>),
 
     Past = wh_util:current_tstamp() - ?ARCHIVE_WINDOW,
     Match = [{#call_stat{entered_timestamp='$1'
@@ -615,9 +625,9 @@ maybe_archive_call_data(Srv, Match) ->
         Stats ->
             couch_mgr:suppress_change_notice(),
             ToSave = lists:foldl(fun archive_call_fold/2, dict:new(), Stats),
-            [couch_mgr:save_docs(acdc_stats_util:db_name(Account), Docs)
-             || {Account, Docs} <- dict:to_list(ToSave)
-            ],
+            _ = [couch_mgr:save_docs(acdc_stats_util:db_name(Account), Docs)
+                 || {Account, Docs} <- dict:to_list(ToSave)
+                ],
             [gen_listener:cast(Srv, {'update_call', Id, [{#call_stat.is_archived, 'true'}]})
              || #call_stat{id=Id} <- Stats
             ]
@@ -629,14 +639,14 @@ query_call_fold(#call_stat{status=Status}=Stat, Acc) ->
     dict:update(Status, fun(L) -> [Doc | L] end, [Doc], Acc).
 
 -spec archive_call_fold(call_stat(), dict()) -> dict().
-archive_call_fold(#call_stat{acct_id=AccountId}=Stat, Acc) ->
+archive_call_fold(#call_stat{account_id=AccountId}=Stat, Acc) ->
     Doc = call_stat_to_doc(Stat),
     dict:update(AccountId, fun(L) -> [Doc | L] end, [Doc], Acc).
 
 -spec call_stat_to_doc(call_stat()) -> wh_json:object().
 call_stat_to_doc(#call_stat{id=Id
                             ,call_id=CallId
-                            ,acct_id=AccountId
+                            ,account_id=AccountId
                             ,queue_id=QueueId
                             ,agent_id=AgentId
                             ,entered_timestamp=EnteredT
@@ -648,6 +658,7 @@ call_stat_to_doc(#call_stat{id=Id
                             ,status=Status
                             ,caller_id_name=CallerIdName
                             ,caller_id_number=CallerIdNumber
+                            ,caller_priority=CallerPriority
                            }) ->
     wh_doc:update_pvt_parameters(
       wh_json:from_list(
@@ -665,6 +676,7 @@ call_stat_to_doc(#call_stat{id=Id
            ,{<<"status">>, Status}
            ,{<<"caller_id_name">>, CallerIdName}
            ,{<<"caller_id_number">>, CallerIdNumber}
+           ,{<<"caller_priority">>, CallerPriority}
            ,{<<"wait_time">>, wait_time(EnteredT, AbandonedT, HandledT)}
            ,{<<"talk_time">>, talk_time(HandledT, ProcessedT)}
           ]))
@@ -676,7 +688,7 @@ call_stat_to_doc(#call_stat{id=Id
 -spec call_stat_to_json(call_stat()) -> wh_json:object().
 call_stat_to_json(#call_stat{id=Id
                              ,call_id=CallId
-                             ,acct_id=AccountId
+                             ,account_id=AccountId
                              ,queue_id=QueueId
                              ,agent_id=AgentId
                              ,entered_timestamp=EnteredT
@@ -844,13 +856,14 @@ create_call_stat(Id, JObj, Props) ->
                       ,{'create_call', #call_stat{
                                           id = Id
                                           ,call_id = wh_json:get_value(<<"Call-ID">>, JObj)
-                                          ,acct_id = wh_json:get_value(<<"Account-ID">>, JObj)
+                                          ,account_id = wh_json:get_value(<<"Account-ID">>, JObj)
                                           ,queue_id = wh_json:get_value(<<"Queue-ID">>, JObj)
                                           ,entered_timestamp = wh_json:get_value(<<"Entered-Timestamp">>, JObj)
                                           ,misses = []
                                           ,status = <<"waiting">>
                                           ,caller_id_name = wh_json:get_value(<<"Caller-ID-Name">>, JObj)
                                           ,caller_id_number = wh_json:get_value(<<"Caller-ID-Number">>, JObj)
+                                          ,caller_priority = wh_json:get_integer_value(<<"Caller-Priority">>, JObj)
                                          }
                        }).
 

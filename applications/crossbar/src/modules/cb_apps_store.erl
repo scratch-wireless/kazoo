@@ -347,18 +347,22 @@ normalize_apps_result(Apps) ->
 
 normalize_apps_result([], Acc) -> Acc;
 normalize_apps_result([App|Apps], Acc) ->
-    JObj =
-        wh_json:from_list(
-            props:filter_undefined(
-              [{<<"id">>, wh_json:get_value(<<"_id">>, App)}
-               ,{<<"name">>, wh_json:get_value(<<"name">>, App)}
-               ,{<<"i18n">>, wh_json:get_value(<<"i18n">>, App)}
-               ,{<<"tags">>, wh_json:get_value(<<"tags">>, App)}
-               ,{<<"api_url">>, wh_json:get_value(<<"api_url">>, App)}
-               ,{<<"source_url">>, wh_json:get_value(<<"source_url">>, App)}
-              ])
-         ),
-    normalize_apps_result(Apps, [JObj|Acc]).
+    case wh_json:is_true(<<"published">>, App, 'true') of
+        'false' -> normalize_apps_result(Apps, Acc);
+        'true' ->
+            JObj =
+                wh_json:from_list(
+                  props:filter_undefined(
+                    [{<<"id">>, wh_doc:id(App)}
+                    ,{<<"name">>, wh_json:get_value(<<"name">>, App)}
+                    ,{<<"i18n">>, wh_json:get_value(<<"i18n">>, App)}
+                    ,{<<"tags">>, wh_json:get_value(<<"tags">>, App)}
+                    ,{<<"api_url">>, wh_json:get_value(<<"api_url">>, App)}
+                    ,{<<"source_url">>, wh_json:get_value(<<"source_url">>, App)}
+                    ])
+                 ),
+            normalize_apps_result(Apps, [JObj|Acc])
+    end.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -559,7 +563,7 @@ get_attachment(Context, Id) ->
     end.
 
 get_attachment(Context, Id, JObj, Attachment) ->
-    Db = wh_json:get_value(<<"pvt_account_db">>, JObj),
+    Db = wh_doc:account_db(JObj),
     AppId = wh_doc:id(JObj),
     case couch_mgr:fetch_attachment(Db, AppId, Id) of
         {'error', R} ->
@@ -595,10 +599,10 @@ add_attachment(Context, Id, Attachment, AttachBin) ->
                                           {'ok', wh_json:object()} |
                                           {'error', _}.
 replicate_account_definition(JObj) ->
-    AccountId = wh_json:get_value(<<"_id">>, JObj),
+    AccountId = wh_doc:id(JObj),
     case couch_mgr:lookup_doc_rev(?WH_ACCOUNTS_DB, AccountId) of
         {'ok', Rev} ->
-            couch_mgr:ensure_saved(?WH_ACCOUNTS_DB, wh_json:set_value(<<"_rev">>, Rev, JObj));
+            couch_mgr:ensure_saved(?WH_ACCOUNTS_DB, wh_doc:set_revision(JObj, Rev));
         _Else ->
-            couch_mgr:ensure_saved(?WH_ACCOUNTS_DB, wh_json:delete_key(<<"_rev">>, JObj))
+            couch_mgr:ensure_saved(?WH_ACCOUNTS_DB, wh_doc:delete_revision(JObj))
     end.

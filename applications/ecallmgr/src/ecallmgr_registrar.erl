@@ -52,12 +52,14 @@
                        ,[{<<"directory">>, <<"reg_flush">>}]
                       }
                     ]).
--define(BINDINGS, [{'registration', [{'restrict_to', ['reg_success'
-                                                      ,'reg_query'
+-define(BINDINGS, [{'registration', [{'restrict_to', ['reg_query'
                                                       ,'reg_flush'
                                                      ]}
                                      ,'federate'
                                     ]}
+                   ,{'registration', [{'restrict_to', ['reg_success'
+                                                      ]}
+                                     ]}
                    ,{'self', []}
                   ]).
 -define(SERVER, ?MODULE).
@@ -65,7 +67,9 @@
 -define(REG_QUEUE_OPTIONS, []).
 -define(REG_CONSUME_OPTIONS, []).
 
--record(state, {started = wh_util:current_tstamp()}).
+-record(state, {started = wh_util:current_tstamp()
+                ,queue :: api_binary()
+               }).
 
 -record(registration, {id :: {ne_binary(), ne_binary()} | '_' | '$1'
                        ,username :: ne_binary() | '_'
@@ -328,7 +332,7 @@ count() -> ets:info(?MODULE, 'size').
 
 -spec handle_reg_success(atom(), wh_proplist()) -> 'ok'.
 handle_reg_success(Node, Props) ->
-    put('callid', props:get_first_defined([<<"Call-ID">>, <<"call-id">>], Props, 'reg_success')),
+    wh_util:put_callid(props:get_first_defined([<<"Call-ID">>, <<"call-id">>], Props, 'reg_success')),
     Req = lists:foldl(fun(<<"Contact">>=K, Acc) ->
                               [{K, get_fs_contact(Props)} | Acc];
                          (K, Acc) ->
@@ -372,7 +376,7 @@ init([]) ->
     process_flag('trap_exit', 'true'),
     lager:debug("starting new ecallmgr registrar"),
     _ = ets:new(?MODULE, ['set', 'protected', 'named_table', {'keypos', #registration.id}]),
-    erlang:send_after(2000, self(), 'expire'),
+    erlang:send_after(2 * ?MILLISECONDS_IN_SECOND, self(), 'expire'),
 
     gproc:reg({'p', 'l', ?REGISTER_SUCCESS_REG}),
 
@@ -415,7 +419,7 @@ handle_cast({'update_registration', {Username, Realm}=Id, Props}, State) ->
     _ = ets:update_element(?MODULE, Id, Props),
     {'noreply', State};
 handle_cast({'delete_registration', #registration{id=Id}=Reg}, State) ->
-    spawn(fun() -> maybe_send_deregister_notice(Reg) end),
+    _ = wh_util:spawn(fun() -> maybe_send_deregister_notice(Reg) end),
     ets:delete(?MODULE, Id),
     {'noreply', State};
 handle_cast('flush', State) ->
@@ -439,6 +443,11 @@ handle_cast({'flush', Realm}, State) ->
 handle_cast({'flush', Username, Realm}, State) ->
     _ = ets:delete(?MODULE, registration_id(Username, Realm)),
     {'noreply', State};
+handle_cast({'gen_listener', {'created_queue', Q}}, State) ->
+    {'noreply', State#state{queue=Q}};
+handle_cast({'gen_listener',{'is_consuming', 'true'}}, #state{queue=Q}=State) ->
+    wapi_registration:publish_sync(wh_api:default_headers(Q, ?APP_NAME, ?APP_VERSION)),
+    {'noreply', State};
 handle_cast(_Msg, State) ->
     {'noreply', State}.
 
@@ -454,10 +463,10 @@ handle_cast(_Msg, State) ->
 %%--------------------------------------------------------------------
 handle_info('expire', State) ->
     _ = expire_objects(),
-    _ = erlang:send_after(2000, self(), 'expire'),
+    _ = erlang:send_after(2 * ?MILLISECONDS_IN_SECOND, self(), 'expire'),
     {'noreply', State};
 handle_info(?REGISTER_SUCCESS_MSG(Node, Props), State) ->
-    spawn(?MODULE, 'handle_reg_success', [Node, Props]),
+    _ = wh_util:spawn(?MODULE, 'handle_reg_success', [Node, Props]),
     {'noreply', State};
 handle_info(_Info, State) ->
     lager:debug("unhandled message: ~p", [_Info]),
@@ -555,29 +564,46 @@ maybe_fetch_contact(Username, Realm) ->
 fetch_contact(Username, Realm) ->
     Reg = [{<<"Username">>, Username}
            ,{<<"Realm">>, Realm}
-           ,{<<"Fields">>, [<<"Contact">>]}
+           ,{<<"Fields">>, [<<"Contact">>, <<"Bridge-RURI">>]}
            | wh_api:default_headers(?APP_NAME, ?APP_VERSION)
           ],
     case query_for_registration(Reg) of
         {'ok', JObjs} ->
-            case [Contact
-                  || JObj <- JObjs
-                         ,wapi_registration:query_resp_v(JObj)
-                         ,(Contact = wh_json:get_value([<<"Fields">>, 1, <<"Contact">>]
-                                                       ,JObj)) =/= 'undefined'
-                 ]
-            of
-                [Contact|_] ->
-                    lager:info("fetched user ~s@~s contact ~s", [Username, Realm, Contact]),
-                    {'ok', Contact};
-                _Else ->
-                    lager:info("contact query for user ~s@~s returned an empty result", [Username, Realm]),
-                    {'error', 'not_found'}
-            end;
+            process_query_resp_contacts(Username, Realm, JObjs);
         _Else ->
             lager:info("contact query for user ~s@~s failed: ~p", [Username, Realm, _Else]),
             {'error', 'not_found'}
     end.
+
+-spec process_query_resp_contacts(ne_binary(), ne_binary(), wh_json:objects()) ->
+                                         {'ok', ne_binary()} |
+                                         {'error', 'not_found'}.
+process_query_resp_contacts(Username, Realm, JObjs) ->
+    case find_contacts_in_query_resp(JObjs) of
+        [Contact|_] ->
+            lager:info("fetched user ~s@~s contact ~s", [Username, Realm, Contact]),
+            {'ok', Contact};
+        _Else ->
+            lager:info("contact query for user ~s@~s returned an empty result", [Username, Realm]),
+            {'error', 'not_found'}
+    end.
+
+-spec find_contacts_in_query_resp(wh_json:objects()) -> ne_binaries().
+find_contacts_in_query_resp(JObjs) ->
+    [Contact
+     || JObj <- JObjs,
+        wapi_registration:query_resp_v(JObj),
+        (Contact = find_contact_in_query_resp(JObj))
+            =/= 'undefined'
+    ].
+
+-spec find_contact_in_query_resp(wh_json:object()) -> api_binary().
+find_contact_in_query_resp(JObj) ->
+    wh_json:get_first_defined([[<<"Fields">>, 1, <<"Bridge-RURI">>]
+                               ,[<<"Fields">>, 1, <<"Contact">>]
+                              ]
+                              ,JObj
+                             ).
 
 -spec query_for_registration(api_terms()) ->
                                     {'ok', wh_json:objects()} |
@@ -586,7 +612,7 @@ query_for_registration(Reg) ->
     wh_amqp_worker:call_collect(Reg
                                 ,fun wapi_registration:publish_query_req/1
                                 ,{'ecallmgr', fun wapi_registration:query_resp_v/1, 'true'}
-                                ,2000
+                                ,2 * ?MILLISECONDS_IN_SECOND
                                ).
 
 -spec maybe_fetch_original_contact(ne_binary(), ne_binary()) ->
@@ -610,7 +636,7 @@ fetch_original_contact(Username, Realm) ->
     case wh_amqp_worker:call_collect(Reg
                                      ,fun wapi_registration:publish_query_req/1
                                      ,{'ecallmgr', fun wapi_registration:query_resp_v/1, 'true'}
-                                     ,2000
+                                     ,2 * ?MILLISECONDS_IN_SECOND
                                     )
     of
         {'ok', JObjs} ->
@@ -647,7 +673,7 @@ expire_objects() ->
 -spec expire_object(_) -> 'ok'.
 expire_object('$end_of_table') -> 'ok';
 expire_object({[#registration{id=Id}=Reg], Continuation}) ->
-    spawn(fun() -> maybe_send_deregister_notice(Reg) end),
+    _ = wh_util:spawn(fun() -> maybe_send_deregister_notice(Reg) end),
     _ = ets:delete(?MODULE, Id),
     expire_object(ets:select(Continuation)).
 
@@ -768,8 +794,6 @@ create_registration(JObj) ->
                                                                                 ,<<"Node">>
                                                                                ], JObj)
                                      ,registrar_hostname=wh_json:get_value(<<"Hostname">>, JObj)
-                                     ,suppress_unregister = wh_json:is_true(<<"Suppress-Unregister-Notifications">>, JObj)
-                                     ,register_overwrite_notify = wh_json:is_true(<<"Register-Overwrite-Notify">>, JObj)
                                      ,initial = wh_json:is_true(<<"First-Registration">>, JObj, Initial)
                                      ,proxy=Proxy
                                      ,bridge_uri=bridge_uri(OriginalContact, Proxy, Username, Realm)
@@ -788,9 +812,12 @@ maybe_add_ccvs(CCVs, Reg) ->
                      ,owner_id = wh_json:get_value(<<"Owner-ID">>, CCVs)
                      ,account_realm = wh_json:get_value(<<"Account-Realm">>, CCVs)
                      ,account_name = wh_json:get_value(<<"Account-Name">>, CCVs)
+                     ,suppress_unregister = wh_json:is_true(<<"Suppress-Unregister-Notifications">>, CCVs)
+                     ,register_overwrite_notify = wh_json:is_true(<<"Register-Overwrite-Notify">>, CCVs)
                     }.
 
--spec fix_contact(ne_binary()) -> ne_binary().
+-spec fix_contact(api_binary()) -> api_binary().
+fix_contact('undefined') -> 'undefined';
 fix_contact(Contact) ->
     binary:replace(Contact
                    ,[<<"<">>, <<">">>]
@@ -1002,13 +1029,13 @@ maybe_send_deregister_notice(#registration{username=Username
                                            ,suppress_unregister='true'
                                            ,call_id=CallId
                                           }) ->
-    put('callid', CallId),
+    wh_util:put_callid(CallId),
     lager:debug("registration ~s@~s expired", [Username, Realm]);
 maybe_send_deregister_notice(#registration{username=Username
                                            ,realm=Realm
                                            ,call_id=CallId
                                           }=Reg) ->
-    put('callid', CallId),
+    wh_util:put_callid(CallId),
     case oldest_registrar() of
         'false' -> 'ok';
         'true' ->
@@ -1045,6 +1072,7 @@ to_props(Reg) ->
      ,{<<"Authorizing-ID">>, Reg#registration.authorizing_id}
      ,{<<"Authorizing-Type">>, Reg#registration.authorizing_type}
      ,{<<"Suppress-Unregister-Notify">>, Reg#registration.suppress_unregister}
+     ,{<<"Register-Overwrite-Notify">>, Reg#registration.register_overwrite_notify}
      ,{<<"Owner-ID">>, Reg#registration.owner_id}
      ,{<<"Registrar-Node">>, Reg#registration.registrar_node}
      ,{<<"Registrar-Hostname">>, Reg#registration.registrar_hostname}
@@ -1060,6 +1088,7 @@ filter(Fields, JObj) ->
 
 -spec oldest_registrar() -> boolean().
 oldest_registrar() ->
+    wh_nodes:whapp_zone_count(?APP_NAME) =:= 1 andalso
     wh_nodes:whapp_oldest_node(?APP_NAME, 'true') =:= node().
 
 -type ets_continuation() :: '$end_of_table' |

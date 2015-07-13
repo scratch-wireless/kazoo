@@ -61,8 +61,8 @@
 -define(SEARCH_REQ_TYPES, []).
 
 %% Search response for active subscriptions
--define(SEARCH_RESP_HEADERS, [<<"Subscriptions">>]).
--define(OPTIONAL_SEARCH_RESP_HEADERS, []).
+-define(SEARCH_RESP_HEADERS, []).
+-define(OPTIONAL_SEARCH_RESP_HEADERS, [<<"Subscriptions">>]).
 -define(SEARCH_RESP_VALUES, [{<<"Event-Category">>, <<"presence">>}
                              ,{<<"Event-Name">>, <<"search_resp">>}
                             ]).
@@ -159,7 +159,7 @@
 
 %% Sync presence
 -define(SYNC_HEADERS, [<<"Action">>]).
--define(OPTIONAL_SYNC_HEADERS, [<<"Queue">>, <<"Event-Package">>]).
+-define(OPTIONAL_SYNC_HEADERS, [<<"Event-Package">>]).
 -define(SYNC_VALUES, [{<<"Event-Category">>, <<"presence">>}
                       ,{<<"Event-Name">>, <<"sync">>}
                       ,{<<"Action">>, [<<"Request">>, <<"Start">>, <<"End">>]}

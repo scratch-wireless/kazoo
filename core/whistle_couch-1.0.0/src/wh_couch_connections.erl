@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%%% @copyright (C) 2012-2014, 2600Hz INC
+%%% @copyright (C) 2012-2015, 2600Hz INC
 %%% @doc
 %%%
 %%% @end
@@ -77,7 +77,7 @@ wait_for_connection() ->
         _ -> 'ok'
     catch
         'error':{'badmatch','$end_of_table'} ->
-            timer:sleep(random:uniform(1000) + 100),
+            timer:sleep(random:uniform(?MILLISECONDS_IN_SECOND) + 100),
             wait_for_connection()
     end.
 
@@ -268,7 +268,7 @@ set_node_cookie(Cookie) when is_atom(Cookie) ->
 %%--------------------------------------------------------------------
 init([]) ->
     process_flag('trap_exit', 'true'),
-    put('callid', ?LOG_SYSTEM_ID),
+    wh_util:put_callid(?LOG_SYSTEM_ID),
     _ = ets:new(?MODULE, ['ordered_set'
                           ,{'read_concurrency', 'true'}
                           ,{'keypos', #wh_couch_connection.id}

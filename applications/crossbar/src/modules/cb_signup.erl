@@ -40,7 +40,7 @@
 
 -define(SIGNUP_CONF, [code:lib_dir('crossbar', 'priv'), "/signup/signup.conf"]).
 
--record(state, {cleanup_interval = 18000 :: integer() %% once every 5 hours (in seconds)
+-record(state, {cleanup_interval = 5 * ?SECONDS_IN_HOUR :: integer() %% once every 5 hours (in seconds)
                 ,signup_lifespan = ?SECONDS_IN_DAY :: integer() %% 24 hours (in seconds)
                 ,register_cmd = 'undefined' :: 'undefined' | atom()
                 ,activation_email_plain = 'undefined' :: 'undefined' | atom()
@@ -74,12 +74,12 @@ start_link() ->
     {'ok', proc_lib:spawn_link(?MODULE, 'init_it', [])}.
 
 init_it() ->
-    put('callid', ?LOG_SYSTEM_ID),
+    wh_util:put_callid(?LOG_SYSTEM_ID),
     State = init_state(),
     cleanup_loop(State).
 
 cleanup_loop(#state{cleanup_interval=CleanupInterval}=State) ->
-    Wait = CleanupInterval * 1000,
+    Wait = CleanupInterval * ?MILLISECONDS_IN_SECOND,
     receive
         {'send_activation_email', Context} ->
             _ = send_activation_email(Context, State),
@@ -313,7 +313,7 @@ activate_account(Account) ->
     Payload = [#cb_context{doc=Account}],
     case crossbar_bindings:fold(Event, Payload) of
         #cb_context{resp_status='success', resp_data=JObj} ->
-            AccountId = wh_json:get_value(<<"id">>, JObj),
+            AccountId = wh_doc:id(JObj),
             lager:debug("created new account ~s", [AccountId]),
             {'ok', JObj};
         _ ->
@@ -334,13 +334,13 @@ activate_account(Account) ->
 activate_user(_, 'undefined') ->
     {'error', 'user_undefined'};
 activate_user(Account, User) ->
-    AccountId = wh_json:get_value(<<"id">>, Account),
+    AccountId = wh_doc:id(Account),
     Db = wh_util:format_account_id(AccountId, 'encoded'),
     Event = <<"*.execute.put.users">>,
     Payload = [#cb_context{doc=User, db_name=Db}],
     case crossbar_bindings:fold(Event, Payload) of
         #cb_context{resp_status='success', resp_data=JObj} ->
-            UserId = wh_json:get_value(<<"id">>, JObj),
+            UserId = wh_doc:id(JObj),
             lager:debug("created new user ~s in account ~s", [UserId, AccountId]),
             {'ok', Account, JObj};
         _ ->

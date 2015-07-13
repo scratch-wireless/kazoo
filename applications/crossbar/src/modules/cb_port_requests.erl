@@ -3,33 +3,7 @@
 %%% @doc
 %%%
 %%% Handles port request life cycles
-%%% GET /port_requests - list all the account's port requests
-%%% GET /port_requests/descendants - detailed report of a port request
-%%% GET /port_requests/{id} - detailed report of a port request
-%%% GET /port_requests/{id}/loa - build an LOA (Letter of Authorization) PDF
-%%%
-%%% PUT /port_requests - start a new port request
-%%% PUT /port_requests/{id}/submitted - indicate a port request is ready and let port dept know
-%%%   Causes billing to occur
-%%%   Ensure there's at least one attachment of non-0 length
-%%% PUT /port_requests/{id}/scheduled - SDA indicates the port request is being processed
-%%% PUT /port_requests/{id}/completed - SDA can force completion of the port request (populate numbers DBs)
-%%% PUT /port_requests/{id}/rejected - SDA can force rejection of the port request
-%%%
-%%% POST /port_requests/{id} - update a port request
-%%% DELETE /port_requests/{id} - delete a port request, only if in "unconfirmed" or "rejected"
-%%%
-%%% GET /port_request/{id}/attachments - List attachments on the port request
-%%% PUT /port_request/{id}/attachments - upload a document
-%%% GET /port_request/{id}/attachments/{attachment_id} - download the document
-%%% POST /port_request/{id}/attachments/{attachment_id} - replace a document
-%%% DELETE /port_request/{id}/attachments/{attachment_id} - delete a document
-%%%
-%%% { "numbers":{
-%%%   "+12225559999":{
-%%%   },
-%%%   "port_state": ["unconfirmed", "submitted", "scheduled", "completed", "rejected"]
-%%% }
+%%% See doc/port_requests.md
 %%%
 %%% @end
 %%% @contributors:
@@ -51,7 +25,12 @@
 
          ,update_default_template/0
          ,find_template/1, find_template/2
+         ,authority/1
         ]).
+
+-include_lib("whistle_number_manager/include/wh_number_manager.hrl").
+-include_lib("whistle_number_manager/include/wh_port_request.hrl").
+-include("../crossbar.hrl").
 
 -define(MY_CONFIG_CAT, <<(?CONFIG_CAT)/binary, ".port_requests">>).
 
@@ -66,16 +45,15 @@
                                ]).
 
 -define(AGG_VIEW_DESCENDANTS, <<"accounts/listing_by_descendants">>).
+-define(PORT_REQ_NUMBERS, <<"port_requests/port_in_numbers">>).
+-define(ALL_PORT_REQ_NUMBERS, <<"port_requests/all_port_in_numbers">>).
+-define(LISTING_BY_STATE, <<"port_requests/listing_by_state">>).
 
 -define(UNFINISHED_PORT_REQUEST_LIFETIME
         ,whapps_config:get_integer(?MY_CONFIG_CAT, <<"unfinished_port_request_lifetime_s">>, ?SECONDS_IN_DAY * 30)
        ).
 
 -define(PATH_TOKEN_LOA, <<"loa">>).
-
--include_lib("whistle_number_manager/include/wh_number_manager.hrl").
--include_lib("whistle_number_manager/include/wh_port_request.hrl").
--include("../crossbar.hrl").
 
 %%%===================================================================
 %%% API
@@ -90,16 +68,19 @@
 -spec init() -> 'ok'.
 init() ->
     wh_port_request:init(),
-    _ = crossbar_bindings:bind(crossbar_cleanup:binding_system(), ?MODULE, 'cleanup'),
-    _ = crossbar_bindings:bind(<<"*.allowed_methods.port_requests">>, ?MODULE, 'allowed_methods'),
-    _ = crossbar_bindings:bind(<<"*.resource_exists.port_requests">>, ?MODULE, 'resource_exists'),
-    _ = crossbar_bindings:bind(<<"*.content_types_provided.port_requests">>, ?MODULE, 'content_types_provided'),
-    _ = crossbar_bindings:bind(<<"*.content_types_accepted.port_requests">>, ?MODULE, 'content_types_accepted'),
-    _ = crossbar_bindings:bind(<<"*.validate.port_requests">>, ?MODULE, 'validate'),
-    _ = crossbar_bindings:bind(<<"*.execute.get.port_requests">>, ?MODULE, 'get'),
-    _ = crossbar_bindings:bind(<<"*.execute.put.port_requests">>, ?MODULE, 'put'),
-    _ = crossbar_bindings:bind(<<"*.execute.post.port_requests">>, ?MODULE, 'post'),
-    crossbar_bindings:bind(<<"*.execute.delete.port_requests">>, ?MODULE, 'delete').
+
+    Bindings = [{crossbar_cleanup:binding_system(), 'cleanup'}
+                ,{<<"*.allowed_methods.port_requests">>, 'allowed_methods'}
+                ,{<<"*.resource_exists.port_requests">>, 'resource_exists'}
+                ,{<<"*.content_types_provided.port_requests">>, 'content_types_provided'}
+                ,{<<"*.content_types_accepted.port_requests">>, 'content_types_accepted'}
+                ,{<<"*.validate.port_requests">>, 'validate'}
+                ,{<<"*.execute.get.port_requests">>, 'get'}
+                ,{<<"*.execute.put.port_requests">>, 'put'}
+                ,{<<"*.execute.post.port_requests">>, 'post'}
+                ,{<<"*.execute.delete.port_requests">>, 'delete'}
+               ],
+    cb_modules_util:bind(?MODULE, Bindings).
 
 %%--------------------------------------------------------------------
 %% @public
@@ -114,7 +95,7 @@ cleanup(?KZ_PORT_REQUESTS_DB = Db) ->
     ModifiedBefore = wh_util:current_tstamp() - ?UNFINISHED_PORT_REQUEST_LIFETIME,
     ViewOpts = [{'startkey', [0]}
                 ,{'endkey', [ModifiedBefore]}
-                ,{'limit', 5000}
+                ,{'limit', couch_util:max_bulk_insert()}
                 ,'include_docs'
                ],
     case couch_mgr:get_results(Db, <<"port_requests/listing_by_modified">>, ViewOpts) of
@@ -157,7 +138,17 @@ should_delete_port_request(_) ->
 allowed_methods() ->
     [?HTTP_GET, ?HTTP_PUT].
 
-allowed_methods(?PORT_DESCENDANTS) ->
+allowed_methods(?PORT_SUBMITTED) ->
+    [?HTTP_GET];
+allowed_methods(?PORT_PENDING) ->
+    [?HTTP_GET];
+allowed_methods(?PORT_SCHEDULED) ->
+    [?HTTP_GET];
+allowed_methods(?PORT_COMPLETE) ->
+    [?HTTP_GET];
+allowed_methods(?PORT_REJECT) ->
+    [?HTTP_GET];
+allowed_methods(?PORT_CANCELED) ->
     [?HTTP_GET];
 allowed_methods(_Id) ->
     [?HTTP_GET, ?HTTP_POST, ?HTTP_DELETE].
@@ -300,8 +291,18 @@ content_types_accepted(Context, _Id, ?PORT_ATTACHMENT, _AttachmentId) ->
 validate(Context) ->
     validate_port_requests(Context, cb_context:req_verb(Context)).
 
-validate(Context, ?PORT_DESCENDANTS) ->
-    read_descendants(Context);
+validate(Context, ?PORT_SUBMITTED = Type) ->
+    validate_load_requests(Context, Type);
+validate(Context, ?PORT_PENDING = Type) ->
+    validate_load_requests(Context, Type);
+validate(Context, ?PORT_SCHEDULED = Type) ->
+    validate_load_requests(Context, Type);
+validate(Context, ?PORT_COMPLETE = Type) ->
+    validate_load_requests(Context, Type);
+validate(Context, ?PORT_REJECT = Type) ->
+    validate_load_requests(Context, Type);
+validate(Context, ?PORT_CANCELED = Type) ->
+    validate_load_requests(Context, Type);
 validate(Context, Id) ->
     validate_port_request(Context, Id, cb_context:req_verb(Context)).
 
@@ -325,11 +326,63 @@ validate(Context, Id, ?PATH_TOKEN_LOA) ->
 validate(Context, Id, ?PORT_ATTACHMENT, AttachmentId) ->
     validate_attachment(Context, Id, AttachmentId, cb_context:req_verb(Context)).
 
+-spec validate_port_requests(cb_context:context(), http_method()) ->
+                                    cb_context:context().
 validate_port_requests(Context, ?HTTP_GET) ->
-    summary(Context);
+    validate_get_port_requests(
+      Context
+      ,props:get_value(<<"accounts">>, cb_context:req_nouns(Context))
+      ,cb_context:req_value(Context, <<"by_number">>)
+     );
 validate_port_requests(Context, ?HTTP_PUT) ->
     create(Context).
 
+-spec validate_load_requests(cb_context:context(), ne_binary()) ->
+                                    cb_context:context().
+validate_load_requests(Context, ?PORT_COMPLETE = Type) ->
+    case cb_modules_util:range_view_options(Context) of
+        {From, To} ->
+            lager:debug("loading requests for ~s from ~p to ~p", [Type, From, To]),
+            load_requests(Context
+                          ,[{'startkey', [cb_context:account_id(Context), Type, To]}
+                            ,{'endkey', [cb_context:account_id(Context), Type, From]}
+                           ]
+                         );
+        Context1 -> Context1
+    end;
+validate_load_requests(Context, <<_/binary>> = Type) ->
+    lager:debug("loading requests for ~s", [Type]),
+    load_requests(cb_context:set_should_paginate(Context, 'false')
+                  ,[{'startkey', [cb_context:account_id(Context), Type, wh_json:new()]}
+                    ,{'endkey', [cb_context:account_id(Context), Type]}
+                   ]
+                 ).
+
+-spec load_requests(cb_context:context(), crossbar_doc:view_options()) ->
+                           cb_context:context().
+load_requests(Context, ViewOptions) ->
+    crossbar_doc:load_view(?LISTING_BY_STATE
+                           ,['include_docs'
+                             ,'descending'
+                             | ViewOptions
+                            ]
+                           ,cb_context:set_account_db(Context, ?KZ_PORT_REQUESTS_DB)
+                           ,fun normalize_view_results/2
+                          ).
+
+-spec validate_get_port_requests(cb_context:context(), path_tokens(), api_binary()) ->
+                                        cb_context:context().
+validate_get_port_requests(Context, [_AccountId], 'undefined') ->
+    summary(Context);
+validate_get_port_requests(Context, [_AccountId], ByNumber) ->
+    summary_by_number(Context, ByNumber);
+validate_get_port_requests(Context, [_AccountId, ?PORT_DESCENDANTS], 'undefined') ->
+    read_descendants(Context);
+validate_get_port_requests(Context, [_AccountId, ?PORT_DESCENDANTS], ByNumber) ->
+    read_descendants_by_number(Context, ByNumber).
+
+-spec validate_port_request(cb_context:context(), ne_binary(), http_method()) ->
+                                   cb_context:context().
 validate_port_request(Context, Id, ?HTTP_GET) ->
     read(Context, Id);
 validate_port_request(Context, Id, ?HTTP_POST) ->
@@ -337,6 +390,8 @@ validate_port_request(Context, Id, ?HTTP_POST) ->
 validate_port_request(Context, Id, ?HTTP_DELETE) ->
     is_deletable(crossbar_doc:load(Id, cb_context:set_account_db(Context, ?KZ_PORT_REQUESTS_DB))).
 
+-spec validate_port_request(cb_context:context(), ne_binary(), ne_binary(), http_method()) ->
+                                   cb_context:context().
 validate_port_request(Context, Id, ?PORT_SUBMITTED, ?HTTP_POST) ->
     maybe_move_state(Context, Id, ?PORT_SUBMITTED);
 validate_port_request(Context, Id, ?PORT_PENDING, ?HTTP_POST) ->
@@ -622,8 +677,8 @@ read_descendants(Context, SubAccounts) ->
 -spec read_descendants_fold(wh_json:object(), wh_json:objects(), cb_context:context()) ->
                                    wh_json:objects().
 read_descendants_fold(Account, Acc, Context) ->
-    AccountId = wh_json:get_value(<<"id">>, Account),
-    case read_descendant(Context, AccountId) of
+    AccountId = wh_doc:id(Account),
+    case maybe_read_descendant(Context, AccountId) of
         'undefined' -> Acc;
         PortRequests ->
             [wh_json:from_list(
@@ -635,6 +690,40 @@ read_descendants_fold(Account, Acc, Context) ->
              |Acc
             ]
     end.
+
+-spec maybe_read_descendant(cb_context:context(), ne_binary()) -> api_object().
+-spec maybe_read_descendant(cb_context:context(), ne_binary(), boolean()) -> api_object().
+maybe_read_descendant(Context, AccountId) ->
+    maybe_read_descendant(Context, AccountId, wh_services:is_reseller(AccountId)).
+
+maybe_read_descendant(Context, AccountId, 'true') ->
+    case authority(AccountId) of
+        'undefined' -> read_descendant(Context, AccountId);
+        AccountId ->
+            lager:debug("~s is managed by itself", [AccountId]),
+            'undefined';
+        _OtherAccountId ->
+            lager:warning("~s is managed by unknown: ~s", [AccountId, _OtherAccountId]),
+            read_descendant(Context, AccountId)
+    end;
+maybe_read_descendant(Context, AccountId, 'false') ->
+    ResellerId = wh_services:find_reseller_id(AccountId),
+    AuthAccountId = cb_context:auth_account_id(Context),
+    case authority(ResellerId) of
+        'undefined' -> read_descendant(Context, AccountId);
+        AuthAccountId -> read_descendant(Context, AccountId);
+        _OtherAccountId ->
+            lager:debug("~s is managed by reseller: ~s", [AccountId, _OtherAccountId]),
+            'undefined'
+    end.
+
+-spec authority(ne_binary()) -> api_binary().
+authority(AccountId) ->
+  case kz_whitelabel:fetch(AccountId) of
+      {'error', _R} -> 'undefined';
+      {'ok', JObj} ->
+          kz_whitelabel:port_authority(JObj)
+  end.
 
 -spec read_descendant(cb_context:context(), ne_binary()) -> api_object().
 read_descendant(Context, Id) ->
@@ -681,7 +770,88 @@ summary(Context) ->
 %% @doc
 %% @end
 %%--------------------------------------------------------------------
--spec normalize_view_results(wh_json:object(), wh_json:objects()) -> wh_json:objects().
+-spec summary_by_number(cb_context:context(), ne_binary()) ->
+                               cb_context:context().
+summary_by_number(Context, Number) ->
+    ViewOptions = [{'keys', build_keys(Context, Number)}
+                   ,'include_docs'
+                  ],
+    crossbar_doc:load_view(
+      ?ALL_PORT_REQ_NUMBERS
+      ,ViewOptions
+      ,cb_context:set_account_db(Context, ?KZ_PORT_REQUESTS_DB)
+      ,fun normalize_view_results/2
+     ).
+
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% @end
+%%--------------------------------------------------------------------
+-spec read_descendants_by_number(cb_context:context(), ne_binary()) ->
+                                        cb_context:context().
+read_descendants_by_number(Context, Number) ->
+    ViewOptions = [{'keys', build_keys(Context, Number)}
+                   ,'include_docs'
+                  ],
+    crossbar_doc:load_view(
+      ?ALL_PORT_REQ_NUMBERS
+      ,ViewOptions
+      ,cb_context:set_account_db(Context, ?KZ_PORT_REQUESTS_DB)
+      ,fun normalize_view_results/2
+     ).
+
+-type descendant_keys() :: [ne_binaries(),...] | [].
+
+-spec build_keys(cb_context:context(), ne_binary()) ->
+                        descendant_keys().
+build_keys(Context, Number) ->
+    build_keys_from_account(
+      wnm_util:to_e164(Number)
+      ,props:get_value(<<"accounts">>, cb_context:req_nouns(Context))
+     ).
+
+-spec build_keys_from_account(ne_binary(), ne_binaries()) ->
+                                     descendant_keys().
+build_keys_from_account(E164, [AccountId]) ->
+    [[AccountId, E164]];
+build_keys_from_account(E164, [AccountId, ?PORT_DESCENDANTS]) ->
+    ViewOptions = [{'startkey', [AccountId]}
+                   ,{'endkey', [AccountId, wh_json:new()]}
+                  ],
+    case couch_mgr:get_results(
+           ?WH_ACCOUNTS_DB
+           ,?AGG_VIEW_DESCENDANTS
+           ,ViewOptions
+          )
+    of
+        {'error', _R} ->
+            lager:error("failed to query view ~p", [_R]),
+            [];
+        {'ok', JObjs} ->
+            lists:foldl(
+              fun(JObj, Acc) ->
+                      build_descendant_key(JObj, Acc, E164)
+              end
+              ,[[AccountId, E164]]
+              ,JObjs
+             )
+    end.
+
+-spec build_descendant_key(wh_json:object(), descendant_keys(), ne_binary()) ->
+                                  descendant_keys().
+build_descendant_key(JObj, Acc, E164) ->
+    [[wh_doc:id(JObj), E164]
+     |Acc
+    ].
+
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% @end
+%%--------------------------------------------------------------------
+-spec normalize_view_results(wh_json:object(), wh_json:objects()) ->
+                                    wh_json:objects().
 normalize_view_results(Res, Acc) ->
     [wh_port_request:public_fields(wh_json:get_value(<<"doc">>, Res)) | Acc].
 
@@ -790,7 +960,7 @@ check_number_portability(PortId, Number, Context) ->
     E164 = wnm_util:to_e164(Number),
     lager:debug("checking ~s(~s) for portability", [E164, Number]),
     PortOptions = [{'key', E164}],
-    case couch_mgr:get_results(?KZ_PORT_REQUESTS_DB, <<"port_requests/port_in_numbers">>, PortOptions) of
+    case couch_mgr:get_results(?KZ_PORT_REQUESTS_DB, ?PORT_REQ_NUMBERS, PortOptions) of
         {'ok', []} -> check_number_existence(E164, Number, Context);
         {'ok', [PortReq]} ->
             check_number_portability(PortId, Number, Context, E164, PortReq);
@@ -806,7 +976,7 @@ check_number_portability(PortId, Number, Context) ->
 
 check_number_portability(PortId, Number, Context, E164, PortReq) ->
     case {wh_json:get_value(<<"value">>, PortReq) =:= cb_context:account_id(Context)
-          ,wh_json:get_value(<<"id">>, PortReq) =:= PortId
+          ,wh_doc:id(PortReq) =:= PortId
          }
     of
         {'true', 'true'} ->
@@ -818,9 +988,9 @@ check_number_portability(PortId, Number, Context, E164, PortReq) ->
         {'true', 'false'} ->
             lager:debug(
                 "number ~s(~s) is on a different port request in this account(~s): ~s"
-                ,[E164, Number, cb_context:account_id(Context), wh_json:get_value(<<"id">>, PortReq)]
+                ,[E164, Number, cb_context:account_id(Context), wh_doc:id(PortReq)]
             ),
-            Message = <<"Number is on a port request already: ", (wh_json:get_value(<<"id">>, PortReq))/binary>>,
+            Message = <<"Number is on a port request already: ", (wh_doc:id(PortReq))/binary>>,
             number_validation_error(Context, Number, Message);
         {'false', _} ->
             lager:debug(

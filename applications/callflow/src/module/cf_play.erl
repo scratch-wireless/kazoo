@@ -23,7 +23,7 @@
 -spec handle(wh_json:object(), whapps_call:call()) -> 'ok'.
 handle(Data, Call) ->
     AccountId = whapps_call:account_id(Call),
-    Path = wh_json:get_value(<<"id">>, Data),
+    Path = wh_doc:id(Data),
     case wh_media_util:media_path(Path, AccountId) of
         'undefined' ->
             lager:info("invalid data in the play callflow"),
@@ -37,7 +37,7 @@ handle(Data, Call) ->
 handle_noop_recv(_OldCall, {'ok', Call}) ->
     cf_exe:set_call(Call),
     cf_exe:continue(Call);
-handle_noop_recv(Call, {'error', 'channel_destroy'}) ->
+handle_noop_recv(Call, {'error', 'channel_hungup'}) ->
     cf_exe:hard_stop(Call);
 handle_noop_recv(Call, {'error', _E}) ->
     lager:debug("failure playing: ~p", [_E]),

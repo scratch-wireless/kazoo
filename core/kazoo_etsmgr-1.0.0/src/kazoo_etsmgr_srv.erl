@@ -102,7 +102,7 @@ init([Opts]) ->
     TableId = opt_table_id(Opts),
     TableOptions = opt_table_options(Opts),
 
-    put('callid', <<"etssrv_", (wh_util:to_binary(TableId))/binary>>),
+    wh_util:put_callid(<<"etssrv_", (wh_util:to_binary(TableId))/binary>>),
     gen_server:cast(self(), {'begin', TableId, TableOptions}),
 
     lager:debug("started etsmgr for table ~p", [TableId]),
@@ -220,7 +220,8 @@ handle_info(_Info, State) ->
     {'noreply', State}.
 
 send_give_away_retry(Tbl) ->
-    erlang:send(self(), {'give_away', Tbl}).
+    _ = erlang:send(self(), {'give_away', Tbl}),
+    'ok'.
 
 -spec find_me(find_me_fun(), pid()) -> 'ok'.
 find_me(Fun, Srv) ->

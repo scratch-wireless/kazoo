@@ -527,12 +527,12 @@ sync_moderator(JObj, Call, #participant{conference=Conference
         andalso gen_listener:cast(self(), 'mute'),
     whapps_conference:moderator_join_deaf(Conference)
         andalso gen_listener:cast(self(), 'deaf'),
-    _ = spawn(fun() -> notify_requestor(whapps_call:controller_queue(Call)
-                                        ,ParticipantId
-                                        ,DiscoveryEvent
-                                        ,whapps_conference:id(Conference)
-                                       )
-              end),
+    _ = wh_util:spawn(fun() -> notify_requestor(whapps_call:controller_queue(Call)
+                                                ,ParticipantId
+                                                ,DiscoveryEvent
+                                                ,whapps_conference:id(Conference)
+                                               )
+                      end),
     Participant#participant{in_conference='true'
                             ,muted=Muted
                             ,deaf=Deaf
@@ -552,12 +552,12 @@ sync_member(JObj, Call, #participant{conference=Conference
         andalso gen_listener:cast(self(), 'mute'),
     whapps_conference:member_join_deaf(Conference)
         andalso gen_listener:cast(self(), 'deaf'),
-    _ = spawn(fun() -> notify_requestor(whapps_call:controller_queue(Call)
-                                        ,ParticipantId
-                                        ,DiscoveryEvent
-                                        ,whapps_conference:id(Conference)
-                                       )
-              end),
+    _ = wh_util:spawn(fun() -> notify_requestor(whapps_call:controller_queue(Call)
+                                                ,ParticipantId
+                                                ,DiscoveryEvent
+                                                ,whapps_conference:id(Conference)
+                                               )
+                      end),
     Participant#participant{in_conference='true'
                             ,muted=Muted
                             ,deaf=Deaf
@@ -603,18 +603,15 @@ bridge_to_conference(Route, Conference, Call) ->
 
 -spec get_account_realm(whapps_call:call()) -> ne_binary().
 get_account_realm(Call) ->
-    AccountDb = whapps_call:account_db(Call),
-    AccountId = whapps_call:account_id(Call),
-    get_account_realm(AccountDb, AccountId).
-
--spec get_account_realm(api_binary(), api_binary()) -> ne_binary().
-get_account_realm('undefined', _) -> <<"unknown">>;
-get_account_realm(AccountDb, AccountId) ->
-    case couch_mgr:open_cache_doc(AccountDb, AccountId) of
-        {'ok', JObj} -> wh_json:get_ne_value(<<"realm">>, JObj);
-        {'error', R} ->
-            lager:debug("error while looking up account realm: ~p", [R]),
-            <<"unknown">>
+    case whapps_call:account_id(Call) of
+        'undefined' -> <<"unknown">>;
+        AccountId ->
+            case kz_account:fetch(AccountId) of
+                {'ok', JObj} -> kz_account:realm(JObj, <<"unknown">>);
+                {'error', R} ->
+                    lager:debug("error while looking up account realm: ~p", [R]),
+                    <<"unknown">>
+            end
     end.
 
 -spec send_conference_command(whapps_conference:conference(), whapps_call:call()) -> 'ok'.

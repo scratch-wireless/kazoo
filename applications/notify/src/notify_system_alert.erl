@@ -45,10 +45,10 @@ init() ->
 -spec handle_req(wh_json:object(), proplist()) -> 'ok'.
 handle_req(JObj, _Props) ->
     'true' = wapi_notifications:system_alert_v(JObj),
-    whapps_util:put_callid(JObj),
+    wh_util:put_callid(JObj),
     lager:debug("creating system alert notice"),
     UseEmail = whapps_config:get_is_true(?MOD_CONFIG_CAT, <<"enable_email_alerts">>, 'true'),
-    SUBUrl = whapps_config:get_string(?MOD_CONFIG_CAT, <<"subscriber_url">>),
+    SUBUrl = whapps_config:get(?MOD_CONFIG_CAT, <<"subscriber_url">>),
     case wh_json:get_value([<<"Details">>,<<"Format">>], JObj) of
         'undefined' ->
             alert_using_email('true', JObj);
@@ -57,7 +57,7 @@ handle_req(JObj, _Props) ->
             alert_using_POST(SUBUrl, JObj, UseEmail)
     end.
 
--spec alert_using_POST(string(), wh_json:object(), boolean()) -> 'ok'.
+-spec alert_using_POST(ne_binary(), wh_json:object(), boolean()) -> 'ok'.
 alert_using_POST(Url, JObj, EmailUsed) ->
     Fallback = fun(TheJObj) ->
                        alert_using_email(not EmailUsed, TheJObj)

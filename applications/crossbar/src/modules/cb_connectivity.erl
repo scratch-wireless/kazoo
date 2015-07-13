@@ -104,14 +104,14 @@ post(Context, _) ->
     case cb_context:resp_status(Context1) of
         'success' ->
             'ok' = track_assignment('post', Context),
+            _ = crossbar_util:maybe_refresh_fs_xml('sys_info', Context),
             Context1;
         _Status -> Context1
     end.
 
 -spec patch(cb_context:context(), path_token()) -> cb_context:context().
-patch(Context, _) ->
-    'ok' = track_assignment('post', Context),
-    crossbar_doc:save(Context).
+patch(Context, Id) ->
+    post(Context, Id).
 
 -spec put(cb_context:context()) -> cb_context:context().
 put(Context) ->
@@ -130,6 +130,7 @@ delete(Context, _) ->
         'success' ->
             registration_update(Context),
             'ok' = track_assignment('delete', Context),
+            _ = crossbar_util:maybe_refresh_fs_xml('sys_info', Context),
             Context1;
         _Status -> Context1
     end.
@@ -140,7 +141,7 @@ delete(Context, _) ->
 -spec registration_update(cb_context:context()) -> 'ok'.
 registration_update(Context) ->
     crossbar_util:flush_registrations(
-      crossbar_util:get_account_realm(Context)
+      wh_util:get_account_realm(cb_context:account_id(Context))
      ).
 
 %%--------------------------------------------------------------------
@@ -230,7 +231,7 @@ validate_patch(Id, Context) ->
 %%--------------------------------------------------------------------
 -spec on_successful_validation(api_binary(), cb_context:context()) -> cb_context:context().
 on_successful_validation('undefined', Context) ->
-    cb_context:set_doc(Context, wh_json:set_value(<<"pvt_type">>, <<"sys_info">>, cb_context:doc(Context)));
+    cb_context:set_doc(Context, wh_doc:set_type(cb_context:doc(Context), <<"sys_info">>));
 on_successful_validation(Id, Context) ->
     crossbar_doc:load_merge(Id, Context).
 
@@ -257,4 +258,4 @@ summary(Context) ->
 %%--------------------------------------------------------------------
 -spec normalize_view_results(wh_json:object(), wh_json:objects()) -> wh_json:objects().
 normalize_view_results(JObj, Acc) ->
-    [wh_json:get_value(<<"id">>, JObj)|Acc].
+    [wh_doc:id(JObj) | Acc].

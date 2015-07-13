@@ -27,7 +27,7 @@
 
 -include("whistle_media.hrl").
 
--define(TIMEOUT_LIFETIME, 600000).
+-define(TIMEOUT_LIFETIME, 600 * ?MILLISECONDS_IN_SECOND).
 -define(TIMEOUT_MESSAGE, {'$wh_media_file_cache', 'file_timeout'}).
 
 -record(state, {
@@ -81,8 +81,8 @@ continuous(Srv) -> gen_server:call(Srv, 'continuous').
 %%--------------------------------------------------------------------
 init([Db, Id, Attachment, CallId]) ->
     case wh_util:is_empty(CallId) of
-        'true' -> put('callid', ?LOG_SYSTEM_ID);
-        'false' -> put('callid', CallId)
+        'true' -> wh_util:put_callid(?LOG_SYSTEM_ID);
+        'false' -> wh_util:put_callid(CallId)
     end,
     maybe_start_file_cache(Db, Id, Attachment).
 

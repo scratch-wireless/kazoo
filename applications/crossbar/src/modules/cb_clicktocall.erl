@@ -180,8 +180,7 @@ validate(Context, Id, ?CONNECT_CALL) ->
 post(Context, _) ->
     crossbar_doc:save(Context).
 post(Context, _, ?CONNECT_CALL) ->
-    Context1 = crossbar_doc:save(Context),
-    cb_context:set_resp_data(Context1, cb_context:resp_data(Context)).
+    Context.
 
 -spec patch(cb_context:context(), path_token()) -> cb_context:context().
 patch(Context, _) ->
@@ -266,7 +265,7 @@ maybe_migrate_history(Account) ->
 
 -spec migrate_histories(ne_binary(), ne_binary(), wh_json:objects()) -> 'ok'.
 migrate_histories(AccountId, AccountDb, C2Cs) ->
-    [migrate_history(AccountId, AccountDb, wh_json:get_value(<<"doc">>, C2C)) || C2C <- C2Cs],
+    _ = [migrate_history(AccountId, AccountDb, wh_json:get_value(<<"doc">>, C2C)) || C2C <- C2Cs],
     'ok'.
 
 -spec migrate_history(ne_binary(), ne_binary(), wh_json:object()) -> 'ok'.
@@ -274,8 +273,8 @@ migrate_history(AccountId, AccountDb, C2C) ->
     case wh_json:get_value(<<"pvt_history">>, C2C, []) of
         [] -> 'ok';
         History ->
-            Id = wh_json:get_value(<<"_id">>, C2C),
-            [save_history_item(AccountId, HistoryItem, Id) || HistoryItem <- History],
+            Id = wh_doc:id(C2C),
+            _ = [save_history_item(AccountId, HistoryItem, Id) || HistoryItem <- History],
             _Resp = couch_mgr:ensure_saved(AccountDb, wh_json:delete_key(<<"pvt_history">>, C2C)),
             lager:debug("removed history from c2c ~s in ~s: ~p", [Id
                                                                   ,AccountId
@@ -328,24 +327,26 @@ originate_call(C2CId, Context, Contact) ->
     AccountId = cb_context:account_id(Context),
     AccountModb = cb_context:account_modb(Context),
 
-    _Pid = spawn(fun() ->
-                         put('callid', ReqId),
-                         Request = build_originate_req(Contact, Context),
-                         Status = exec_originate(Request),
-                         lager:debug("got status ~p", [Status]),
+    _Pid = wh_util:spawn(
+             fun() ->
+                     wh_util:put_callid(ReqId),
+                     Request = build_originate_req(Contact, Context),
+                     Status = exec_originate(Request),
+                     lager:debug("got status ~p", [Status]),
 
-                         HistoryItem = wh_doc:update_pvt_parameters(
-                                         wh_json:from_list(
-                                           [{<<"pvt_clicktocall_id">>, C2CId}
-                                            | create_c2c_history_item(Status, Contact)
-                                           ]
-                                          )
-                                         ,AccountModb
-                                         ,[{'account_id', AccountId}
-                                           ,{'type', <<"c2c_history">>}
-                                          ]),
-                         kazoo_modb:save_doc(AccountId, HistoryItem)
-                 end),
+                     JObj = wh_json:from_list(
+                              [{<<"pvt_clicktocall_id">>, C2CId}
+                               | create_c2c_history_item(Status, Contact)
+                              ]
+                             ),
+                     HistoryItem =
+                         wh_doc:update_pvt_parameters(JObj
+                                                      ,AccountModb
+                                                      ,[{'account_id', AccountId}
+                                                        ,{'type', <<"c2c_history">>}
+                                                       ]),
+                     kazoo_modb:save_doc(AccountId, HistoryItem)
+             end),
     lager:debug("attempting call in ~p", [_Pid]),
     crossbar_util:response_202(<<"processing request">>, Context).
 
@@ -357,7 +358,7 @@ exec_originate(Request) ->
       wh_amqp_worker:call_collect(Request
                                   ,fun wapi_resource:publish_originate_req/1
                                   ,fun is_resp/1
-                                  ,20000
+                                  ,20 * ?MILLISECONDS_IN_SECOND
                                  )
      ).
 
@@ -417,7 +418,7 @@ build_originate_req(Contact, Context) ->
     CCVs = [{<<"Account-ID">>, AccountId}
             ,{<<"Auto-Answer">>, AutoAnswer}
             ,{<<"Retain-CID">>, <<"true">>}
-            ,{<<"Authorizing-ID">>, wh_json:get_value(<<"_id">>, JObj)}
+            ,{<<"Authorizing-ID">>, wh_doc:id(JObj)}
             ,{<<"Inherit-Codec">>, <<"false">>}
             ,{<<"Authorizing-Type">>, <<"device">>}
            ],
@@ -431,22 +432,22 @@ build_originate_req(Contact, Context) ->
                 ,{<<"Custom-Channel-Vars">>, wh_json:from_list(CCVs)}
                ],
 
-    MsgId = wh_json:get_value(<<"Msg-ID">>, JObj, wh_util:rand_hex_binary(16)),
+    MsgId = wh_json:get_value(<<"msg_id">>, JObj, wh_util:rand_hex_binary(16)),
     props:filter_undefined(
       [{<<"Application-Name">>, <<"transfer">>}
        ,{<<"Application-Data">>, wh_json:from_list([{<<"Route">>, Contact}])}
        ,{<<"Msg-ID">>, MsgId}
        ,{<<"Endpoints">>, [wh_json:from_list(Endpoint)]}
-       ,{<<"Timeout">>, wh_json:get_value(<<"Timeout">>, JObj)}
-       ,{<<"Ignore-Early-Media">>, wh_json:get_value(<<"Ignore-Early-Media">>, JObj)}
-       ,{<<"Media">>, wh_json:get_value(<<"Media">>, JObj)}
-       ,{<<"Hold-Media">>, wh_json:get_value(<<"Hold-Media">>, JObj)}
-       ,{<<"Presence-ID">>, wh_json:get_value(<<"Presence-ID">>, JObj)}
+       ,{<<"Timeout">>, wh_json:get_value(<<"timeout">>, JObj, 30)}
+       ,{<<"Ignore-Early-Media">>, get_ignore_early_media(JObj)}
+       ,{<<"Media">>, wh_json:get_value(<<"media">>, JObj)}
+       ,{<<"Hold-Media">>, wh_json:get_value([<<"music_on_hold">>, <<"media_id">>], JObj)}
+       ,{<<"Presence-ID">>, wh_json:get_value(<<"presence_id">>, JObj)}
        ,{<<"Outbound-Callee-ID-Name">>, CalleeName}
        ,{<<"Outbound-Callee-ID-Number">>, CalleeNumber}
        ,{<<"Outbound-Caller-ID-Name">>, FriendlyName}
        ,{<<"Outbound-Caller-ID-Number">>, OutboundNumber}
-       ,{<<"Ringback">>, wh_json:get_value(<<"Ringback">>, JObj)}
+       ,{<<"Ringback">>, wh_json:get_value(<<"ringback">>, JObj)}
        ,{<<"Dial-Endpoint-Method">>, <<"single">>}
        ,{<<"Continue-On-Fail">>, 'true'}
        ,{<<"Custom-SIP-Headers">>, wh_json:get_value(<<"custom_sip_headers">>, JObj)}
@@ -454,6 +455,10 @@ build_originate_req(Contact, Context) ->
        ,{<<"Export-Custom-Channel-Vars">>, [<<"Account-ID">>, <<"Retain-CID">>, <<"Authorizing-ID">>, <<"Authorizing-Type">>]}
        | wh_api:default_headers(<<"resource">>, <<"originate_req">>, ?APP_NAME, ?APP_VERSION)
       ]).
+
+-spec get_ignore_early_media(wh_json:object()) -> boolean().
+get_ignore_early_media(JObj) ->
+    wh_util:is_true(wh_json:get_value([<<"media">>, <<"ignore_early_media">>], JObj, 'true')).
 
 -spec is_resp(wh_json:objects() | wh_json:object()) -> boolean().
 is_resp([JObj|_]) -> is_resp(JObj);

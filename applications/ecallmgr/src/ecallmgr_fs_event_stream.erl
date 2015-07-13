@@ -66,9 +66,9 @@ start_link(Node, Bindings, Subclasses) ->
 %% @end
 %%--------------------------------------------------------------------
 init([Node, Bindings, Subclasses]) ->
-    put('callid', list_to_binary([wh_util:to_binary(Node)
-                                  ,<<"-eventstream">>
-                                 ])),
+    wh_util:put_callid(list_to_binary([wh_util:to_binary(Node)
+                                       ,<<"-eventstream">>
+                                      ])),
     gen_server:cast(self(), 'request_event_stream'),
     {'ok', #state{node=Node
                   ,bindings=Bindings
@@ -109,10 +109,10 @@ handle_cast('request_event_stream', #state{node=Node}=State) ->
         {'ok', {IP, Port}} ->
             {'ok', IPAddress} = inet_parse:address(IP),
             gen_server:cast(self(), 'connect'),
-            put('callid', list_to_binary([wh_util:to_binary(Node)
-                                          ,$-, wh_util:to_binary(IP)
-                                         ,$:, wh_util:to_binary(Port)
-                                         ])),
+            wh_util:put_callid(list_to_binary([wh_util:to_binary(Node)
+                                               ,$-, wh_util:to_binary(IP)
+                                               ,$:, wh_util:to_binary(Port)
+                                              ])),
             {'noreply', State#state{ip=IPAddress, port=wh_util:to_integer(Port)}};
         {'error', Reason} ->
             lager:warning("unable to establish event stream to ~p for ~p: ~p", [Node, Bindings, Reason]),
@@ -180,10 +180,10 @@ handle_info({'tcp', Socket, Data}, #state{socket=Socket
             EventProps = props:filter_undefined([{<<"Switch-URL">>, SwitchURL}
                                                  ,{<<"Switch-URI">>, SwitchURI}
                                                 ]) ++ Props ,
-            _ = spawn(fun() ->
-                              maybe_send_event(EventName, UUID, EventProps, Node),
-                              process_event(EventName, UUID, EventProps, Node)
-                      end),
+            _ = wh_util:spawn(fun() ->
+                                      maybe_send_event(EventName, UUID, EventProps, Node),
+                                      process_event(EventName, UUID, EventProps, Node)
+                              end),
             {'noreply', State, Timeout};
         _Else ->
             io:format("~p~n", [_Else]),
@@ -308,12 +308,12 @@ maybe_bind(Node, Bindings) ->
     maybe_bind(Node, Bindings, 0).
 
 maybe_bind(Node, Bindings, 2) ->
-    case gen_server:call({'mod_kazoo', Node}, {'event', Bindings}, 2000) of
+    case gen_server:call({'mod_kazoo', Node}, {'event', Bindings}, 2 * ?MILLISECONDS_IN_SECOND) of
         {'ok', {_IP, _Port}}=OK -> OK;
         {'error', _Reason}=E -> E
     end;
 maybe_bind(Node, Bindings, Attempts) ->
-    case gen_server:call({'mod_kazoo', Node}, {'event', Bindings}, 2000) of
+    case gen_server:call({'mod_kazoo', Node}, {'event', Bindings}, 2 * ?MILLISECONDS_IN_SECOND) of
         {'ok', {_IP, _Port}}=OK -> OK;
         {'error', _Reason} ->
             lager:debug("failed on attempt ~b to bind: ~p", [Attempts, _Reason]),
@@ -416,5 +416,5 @@ maybe_start_event_listener(Node, UUID) ->
 idle_alert_timeout() ->
     case ecallmgr_config:get_integer(<<"event_stream_idle_alert">>, 0) of
         Timeout when Timeout =< 30 -> 'infinity';
-        Else -> Else * 1000
+        Else -> Else * ?MILLISECONDS_IN_SECOND
     end.

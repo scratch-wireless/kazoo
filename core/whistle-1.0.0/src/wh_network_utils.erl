@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%%% @copyright (C) 2010-2014, 2600Hz INC
+%%% @copyright (C) 2010-2015, 2600Hz INC
 %%% @doc
 %%% Various utilities - a veritable cornicopia
 %%% @end
@@ -22,9 +22,14 @@
 -export([iptuple_to_binary/1]).
 -export([pretty_print_bytes/1]).
 
+-export([add_ns/1
+         ,lookup_dns/2
+        ]).
+
 -export([lookup_timeout/0]).
 
 -include_lib("kernel/include/inet.hrl").
+-include_lib("kernel/src/inet_dns.hrl").
 
 -include("../include/wh_types.hrl").
 -include("../include/wh_log.hrl").
@@ -47,8 +52,8 @@ get_hostname() ->
 is_ipv4(Address) when is_binary(Address) ->
     is_ipv4(wh_util:to_list(Address));
 is_ipv4(Address) when is_list(Address) ->
-    case inet_parse:ipv4_address(Address) of
-        {'ok', _} -> lists:member($., Address);
+    case inet_parse:ipv4strict_address(Address) of
+        {'ok', _} -> 'true';
         {'error', _} -> 'false'
     end.
 
@@ -56,8 +61,8 @@ is_ipv4(Address) when is_list(Address) ->
 is_ipv6(Address) when is_binary(Address) ->
     is_ipv6(wh_util:to_list(Address));
 is_ipv6(Address) when is_list(Address) ->
-    case inet_parse:ipv6_address(Address) of
-        {'ok', _} -> lists:member($:, Address);
+    case inet_parse:ipv6strict_address(Address) of
+        {'ok', _} -> 'true';
         {'error', _} -> 'false'
     end.
 
@@ -171,12 +176,22 @@ resolve_a_record(Domain, IPs) ->
 resolve_a_record_fold(IPTuple, I) ->
     [iptuple_to_binary(IPTuple) | I].
 
--spec iptuple_to_binary(inet:ip4_address()) -> ne_binary().
+-spec iptuple_to_binary(inet:ip4_address() | inet:ipv6_address()) -> ne_binary().
 iptuple_to_binary({A,B,C,D}) ->
     <<(wh_util:to_binary(A))/binary, "."
       ,(wh_util:to_binary(B))/binary, "."
       ,(wh_util:to_binary(C))/binary, "."
       ,(wh_util:to_binary(D))/binary
+    >>;
+iptuple_to_binary({I1, I2, I3, I4, I5, I6, I7, I8}) ->
+    <<(wh_util:to_binary(I1))/binary, ":"
+      ,(wh_util:to_binary(I2))/binary, ":"
+      ,(wh_util:to_binary(I3))/binary, ":"
+      ,(wh_util:to_binary(I4))/binary, ":"
+      ,(wh_util:to_binary(I5))/binary, ":"
+      ,(wh_util:to_binary(I6))/binary, ":"
+      ,(wh_util:to_binary(I7))/binary, ":"
+      ,(wh_util:to_binary(I8))/binary, ":"
     >>.
 
 -spec pretty_print_bytes(non_neg_integer()) -> iolist().
@@ -191,3 +206,16 @@ pretty_print_bytes(Bytes) ->
         'true' ->
             io_lib:format("~BB", [Bytes])
     end.
+
+-spec add_ns(ne_binaries() | ne_binary()) -> 'ok'.
+add_ns(Nss) when is_list(Nss) ->
+    _ = [add_ns(Ns) || Ns <- Nss],
+    'ok';
+add_ns(Ns) ->
+    'ok' = inet_db:add_ns(Ns).
+
+-spec lookup_dns(ne_binary(), atom()) ->
+                        {'ok', [inet_res:dns_data()]}.
+%% See kernel/src/inet_dns.hrl, the S_* macros for values for Type
+lookup_dns(Hostname, Type) ->
+    {'ok', inet_res:lookup(wh_util:to_list(Hostname), 'in', Type)}.

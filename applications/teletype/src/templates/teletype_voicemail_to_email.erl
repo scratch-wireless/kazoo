@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%%% @copyright (C) 2014, 2600Hz Inc
+%%% @copyright (C) 2014-2015, 2600Hz Inc
 %%% @doc
 %%%
 %%% @end
@@ -22,7 +22,7 @@
         ,wh_json:from_list(
            [?MACRO_VALUE(<<"voicemail.box">>, <<"voicemail_box">>, <<"Voicemail Box">>, <<"Which voicemail box was the message left in">>)
             ,?MACRO_VALUE(<<"voicemail.name">>, <<"voicemail_name">>, <<"Voicemail Name">>, <<"Name of the voicemail file">>)
-            ,?MACRO_VALUE(<<"voicemail.length">>, <<"voicemail_name">>, <<"Voicemail Name">>, <<"Name of the voicemail file">>)
+            ,?MACRO_VALUE(<<"voicemail.length">>, <<"voicemail_length">>, <<"Voicemail Length">>, <<"Length of the voicemail file">>)
             ,?MACRO_VALUE(<<"call_id">>, <<"call_id">>, <<"Call ID">>, <<"Call ID of the caller">>)
             ,?MACRO_VALUE(<<"owner.first_name">>, <<"first_name">>, <<"First Name">>, <<"First name of the owner of the voicemail box">>)
             ,?MACRO_VALUE(<<"owner.last_name">>, <<"last_name">>, <<"Last Name">>, <<"Last name of the owner of the voicemail box">>)
@@ -45,19 +45,18 @@
 -spec init() -> 'ok'.
 init() ->
     wh_util:put_callid(?MODULE),
-
-    teletype_util:init_template(?TEMPLATE_ID, [{'macros', ?TEMPLATE_MACROS}
-                                               ,{'text', ?TEMPLATE_TEXT}
-                                               ,{'html', ?TEMPLATE_HTML}
-                                               ,{'subject', ?TEMPLATE_SUBJECT}
-                                               ,{'category', ?TEMPLATE_CATEGORY}
-                                               ,{'friendly_name', ?TEMPLATE_NAME}
-                                               ,{'to', ?TEMPLATE_TO}
-                                               ,{'from', ?TEMPLATE_FROM}
-                                               ,{'cc', ?TEMPLATE_CC}
-                                               ,{'bcc', ?TEMPLATE_BCC}
-                                               ,{'reply_to', ?TEMPLATE_REPLY_TO}
-                                              ]).
+    teletype_templates:init(?TEMPLATE_ID, [{'macros', ?TEMPLATE_MACROS}
+                                           ,{'text', ?TEMPLATE_TEXT}
+                                           ,{'html', ?TEMPLATE_HTML}
+                                           ,{'subject', ?TEMPLATE_SUBJECT}
+                                           ,{'category', ?TEMPLATE_CATEGORY}
+                                           ,{'friendly_name', ?TEMPLATE_NAME}
+                                           ,{'to', ?TEMPLATE_TO}
+                                           ,{'from', ?TEMPLATE_FROM}
+                                           ,{'cc', ?TEMPLATE_CC}
+                                           ,{'bcc', ?TEMPLATE_BCC}
+                                           ,{'reply_to', ?TEMPLATE_REPLY_TO}
+                                          ]).
 
 -spec handle_new_voicemail(wh_json:object(), wh_proplist()) -> 'ok'.
 handle_new_voicemail(JObj, _Props) ->
@@ -68,43 +67,53 @@ handle_new_voicemail(JObj, _Props) ->
     DataJObj = wh_json:normalize(JObj),
 
     AccountId = wh_json:get_value(<<"account_id">>, DataJObj),
+
+    teletype_util:is_notice_enabled(AccountId, JObj, ?TEMPLATE_ID)
+        orelse teletype_util:stop_processing("template ~s not enabled for account ~s", [?TEMPLATE_ID, AccountId]),
+
     {'ok', AccountJObj} = teletype_util:open_doc(<<"account">>, AccountId, DataJObj),
 
     VMBoxId = wh_json:get_value(<<"voicemail_box">>, DataJObj),
     {'ok', VMBox} = teletype_util:open_doc(<<"voicemail">>, VMBoxId, DataJObj),
 
-    UserId = wh_json:get_value(<<"owner_id">>, VMBox),
-    {'ok', UserJObj} = teletype_util:open_doc(<<"user">>, UserId, DataJObj),
-    Email = wh_json:get_ne_value(<<"email">>, UserJObj),
-    OwnerId = wh_json:get_value(<<"owner_id">>, VMBox),
+    {'ok', UserJObj} = get_owner(VMBox, DataJObj),
 
-    case teletype_util:should_handle_notification(DataJObj)
-        andalso teletype_util:is_notice_enabled(AccountId, JObj, ?TEMPLATE_ID)
-        andalso wh_json:is_true(<<"vm_to_email_enabled">>, UserJObj)
-        andalso Email =/= 'undefined'
-    of
-        'false' ->
-            lager:debug("sending voicemail to email not configured for owner ~s", [OwnerId]);
+    BoxEmails = kzd_voicemail_box:notification_emails(VMBox),
+
+    %% If the box has emails, continue processing
+    %% or If the voicemail notification is enabled on the user, continue processing
+    %% otherwise stop processing
+    (BoxEmails =/= [] orelse kzd_user:voicemail_notification_enabled(UserJObj))
+        orelse teletype_util:stop_processing("box ~s has no emails or owner doesn't want emails", [VMBoxId]),
+
+    Emails = maybe_add_user_email(BoxEmails, kzd_user:email(UserJObj)),
+
+    ReqData =
+        wh_json:set_values(
+          [{<<"voicemail">>, VMBox}
+           ,{<<"owner">>, UserJObj}
+           ,{<<"account">>, AccountJObj}
+           ,{<<"to">>, Emails}
+          ]
+          ,DataJObj
+         ),
+
+    case teletype_util:is_preview(DataJObj) of
+        'false' -> process_req(ReqData);
         'true' ->
-            lager:debug("voicemail->email enabled for owner ~s", [OwnerId]),
+            process_req(wh_json:merge_jobjs(DataJObj, ReqData))
+    end.
 
-            Emails = [Email | wh_json:get_value(<<"notify_email_address">>, VMBox, [])],
+-spec maybe_add_user_email(ne_binaries(), api_binary()) -> ne_binaries().
+maybe_add_user_email(BoxEmails, 'undefined') -> BoxEmails;
+maybe_add_user_email(BoxEmails, UserEmail) -> [UserEmail | BoxEmails].
 
-            ReqData =
-                wh_json:set_values(
-                    [{<<"voicemail">>, VMBox}
-                     ,{<<"owner">>, UserJObj}
-                     ,{<<"account">>, AccountJObj}
-                     ,{<<"to">>, Emails}
-                    ]
-                    ,DataJObj
-                ),
-
-            case teletype_util:is_preview(DataJObj) of
-                'false' -> process_req(ReqData);
-                'true' ->
-                    process_req(wh_json:merge_jobjs(DataJObj, ReqData))
-            end
+-spec get_owner(kzd_voicemail_box:doc(), wh_json:object()) ->
+                       {'ok', wh_json:object()}.
+get_owner(VMBox, DataJObj) ->
+    case teletype_util:open_doc(<<"user">>, kzd_voicemail_box:owner_id(VMBox), DataJObj) of
+        {'ok', _}=OK -> OK;
+        {'error', 'empty_doc_id'} -> {'ok', wh_json:new()}
     end.
 
 -spec process_req(wh_json:object()) -> 'ok'.
@@ -116,7 +125,7 @@ process_req(DataJObj) ->
              ],
 
     %% Load templates
-    Templates = teletype_util:fetch_templates(?TEMPLATE_ID, DataJObj),
+    Templates = teletype_templates:fetch(?TEMPLATE_ID, DataJObj),
 
     %% Populate templates
     RenderedTemplates =
@@ -126,7 +135,7 @@ process_req(DataJObj) ->
           ]),
 
     AccountId = wh_json:get_value(<<"account_id">>, DataJObj),
-    {'ok', TemplateMetaJObj} = teletype_util:fetch_template_meta(?TEMPLATE_ID, AccountId),
+    {'ok', TemplateMetaJObj} = teletype_templates:fetch_meta(?TEMPLATE_ID, AccountId),
 
     Subject = teletype_util:render_subject(
                 wh_json:find(<<"subject">>, [DataJObj, TemplateMetaJObj], ?TEMPLATE_SUBJECT)
@@ -136,6 +145,7 @@ process_req(DataJObj) ->
     Emails = teletype_util:find_addresses(DataJObj, TemplateMetaJObj, ?MOD_CONFIG_CAT),
 
     EmailAttachements = email_attachments(DataJObj, Macros),
+
     case teletype_util:send_email(Emails, Subject, RenderedTemplates, EmailAttachements) of
         'ok' -> teletype_util:send_update(DataJObj, <<"completed">>);
         {'error', Reason} -> teletype_util:send_update(DataJObj, <<"failed">>, Reason)
@@ -148,9 +158,9 @@ email_attachments(DataJObj, Macros) ->
 
 email_attachments(_DataJObj, _Macros, 'true') -> [];
 email_attachments(DataJObj, Macros, 'false') ->
-    VMId = wh_json:get_value(<<"voicemail_box">>, DataJObj),
+    VMId = wh_json:get_value(<<"voicemail_name">>, DataJObj),
     AccountDb = wh_json:get_value(<<"account_db">>, DataJObj),
-    {'ok', VMJObj} = couch_mgr:open_cache_doc(AccountDb, VMId),
+    {'ok', VMJObj} = couch_mgr:open_doc(AccountDb, VMId),
 
     {[AttachmentMeta], [AttachmentId]} = wh_json:get_values(wh_doc:attachments(VMJObj)),
     {'ok', AttachmentBin} = couch_mgr:fetch_attachment(AccountDb, VMId, AttachmentId),
@@ -285,8 +295,8 @@ build_voicemail_data(DataJObj) ->
 -spec pretty_print_length(api_object() | pos_integer()) -> ne_binary().
 pretty_print_length('undefined') -> <<"00:00">>;
 pretty_print_length(Ms) when is_integer(Ms) ->
-    Seconds = round(Ms / 1000) rem 60,
-    Minutes = trunc(Ms / (1000*60)) rem 60,
+    Seconds = round(Ms / ?MILLISECONDS_IN_SECOND) rem 60,
+    Minutes = trunc(Ms / (?MILLISECONDS_IN_MINUTE)) rem 60,
     wh_util:to_binary(io_lib:format("~2..0w:~2..0w", [Minutes, Seconds]));
 pretty_print_length(JObj) ->
     pretty_print_length(wh_json:get_integer_value(<<"voicemail_length">>, JObj)).

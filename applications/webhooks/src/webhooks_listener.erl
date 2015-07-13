@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%%% @copyright (C) 2013-2014, 2600Hz
+%%% @copyright (C) 2013-2015, 2600Hz
 %%% @doc
 %%%
 %%% @end
@@ -86,7 +86,7 @@ handle_config(JObj, Srv, <<"doc_edited">>) ->
         'undefined' -> find_and_update_hook(JObj, Srv);
         HookId ->
             {'ok', Hook} = couch_mgr:open_cache_doc(?KZ_WEBHOOKS_DB, HookId),
-            case wh_json:is_true(<<"enabled">>, Hook, 'true') of
+            case kzd_webhook:is_enabled(Hook) of
                 'true' ->
                     gen_listener:cast(Srv, {'update_hook', webhooks_util:jobj_to_rec(Hook)});
                 'false' ->
@@ -120,12 +120,7 @@ find_and_update_hook(JObj, Srv) ->
 
 -spec find_and_remove_hook(wh_json:object(), pid()) -> 'ok'.
 find_and_remove_hook(JObj, Srv) ->
-    case find_hook(JObj) of
-        {'ok', Hook} ->
-            gen_listener:cast(Srv, {'remove_hook', webhooks_util:jobj_to_rec(Hook)});
-        {'error', _E} ->
-            lager:debug("failed to remove hook ~s: ~p", [webhooks_util:hook_id(JObj), _E])
-    end.
+    gen_listener:cast(Srv, {'remove_hook', webhooks_util:hook_id(JObj)}).
 
 -spec find_hook(wh_json:object()) ->
                        {'ok', wh_json:object()} |
@@ -135,10 +130,16 @@ find_hook(JObj) ->
                              ,wapi_conf:get_id(JObj)
                             ).
 
+-spec check_failed_attempts() -> 'ok'.
 check_failed_attempts() ->
     Failures = find_failures(),
     check_failures(Failures).
 
+-type failure() :: {{ne_binary(), ne_binary()}, integer()}.
+-type failures() :: [failure(),...] | [].
+
+-spec find_failures() -> failures().
+-spec find_failures([tuple()]) -> failures().
 find_failures() ->
     Keys = wh_cache:fetch_keys_local(?CACHE_NAME),
     find_failures(Keys).
@@ -146,6 +147,7 @@ find_failures() ->
 find_failures(Keys) ->
     dict:to_list(lists:foldl(fun process_failed_key/2, dict:new(), Keys)).
 
+-spec process_failed_key(tuple(), dict()) -> dict().
 process_failed_key(?FAILURE_CACHE_KEY(AccountId, HookId, _Timestamp)
                    ,Dict
                   ) ->
@@ -153,11 +155,11 @@ process_failed_key(?FAILURE_CACHE_KEY(AccountId, HookId, _Timestamp)
 process_failed_key(_Key, Dict) ->
     Dict.
 
--spec check_failures(list()) -> 'ok'.
+-spec check_failures(failures()) -> 'ok'.
 check_failures(Failures) ->
-    [check_failure(AccountId, HookId, Count)
-     || {{AccountId, HookId}, Count} <- Failures
-    ],
+    _ = [check_failure(AccountId, HookId, Count)
+         || {{AccountId, HookId}, Count} <- Failures
+        ],
     'ok'.
 
 -spec check_failure(ne_binary(), ne_binary(), pos_integer()) -> 'ok'.
@@ -180,15 +182,11 @@ check_failure(AccountId, HookId, Count) ->
 disable_hook(AccountId, HookId) ->
     case couch_mgr:open_cache_doc(?KZ_WEBHOOKS_DB, HookId) of
         {'ok', HookJObj} ->
-            Disabled =
-                wh_json:set_values([{<<"enabled">>, 'false'}
-                                    ,{<<"pvt_disabled_message">>, <<"too many failed attempts">>}
-                                   ]
-                                   ,HookJObj
-                                  ),
+            Disabled = kzd_webhook:disable(HookJObj, <<"too many failed attempts">>),
             _ = couch_mgr:ensure_saved(?KZ_WEBHOOKS_DB, Disabled),
             filter_cache(AccountId, HookId),
-            lager:debug("disabled and saved ~s/~s", [AccountId, HookId]);
+            send_notification(AccountId, HookId),
+            lager:debug("auto-disabled and saved hook ~s/~s", [AccountId, HookId]);
         {'error', _E} ->
             lager:debug("failed to find ~s/~s to disable: ~p", [AccountId, HookId, _E])
     end.
@@ -202,6 +200,14 @@ filter_cache(AccountId, HookId) ->
                                     (_K, _V) -> 'false'
                                  end
                                ).
+
+-spec send_notification(ne_binary(), ne_binary()) -> 'ok'.
+send_notification(AccountId, HookId) ->
+    API = [{<<"Account-ID">>, AccountId}
+           ,{<<"Hook-ID">>, HookId}
+           | wh_api:default_headers(?APP_NAME, ?APP_VERSION)
+          ],
+    wh_amqp_worker:cast(API, fun wapi_notifications:publish_webhook_disabled/1).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -259,6 +265,8 @@ handle_cast({'update_hook', #webhook{id=_Id}=Hook}, State) ->
     _ = ets:insert(webhooks_util:table_id(), Hook),
     {'noreply', State};
 handle_cast({'remove_hook', #webhook{id=Id}}, State) ->
+    handle_cast({'remove_hook', Id}, State);
+handle_cast({'remove_hook', <<_/binary>> = Id}, State) ->
     lager:debug("removing hook ~s", [Id]),
     ets:delete(webhooks_util:table_id(), Id),
     {'noreply', State};
@@ -284,14 +292,15 @@ handle_cast(_Msg, State) ->
 handle_info({'ETS-TRANSFER', _TblId, _From, _Data}, State) ->
     lager:info("write access to table '~p' available", [_TblId]),
     Self = self(),
-    _ = spawn(fun() ->
-                      wh_util:put_callid(?MODULE),
-                      webhooks_util:load_hooks(Self),
-                      webhooks_util:init_mods()
-              end),
+    _ = wh_util:spawn(
+          fun() ->
+                  wh_util:put_callid(?MODULE),
+                  webhooks_util:load_hooks(Self),
+                  webhooks_util:init_mods()
+          end),
     {'noreply', State};
 handle_info({'timeout', Ref, ?EXPIRY_MSG}, #state{failure_tref=Ref}=State) ->
-    _ = spawn(?MODULE, 'check_failed_attempts', []),
+    _ = wh_util:spawn(?MODULE, 'check_failed_attempts', []),
     {'noreply', State#state{failure_tref=start_failure_check_timer()}};
 handle_info(_Info, State) ->
     lager:debug("unhandled msg: ~p", [_Info]),

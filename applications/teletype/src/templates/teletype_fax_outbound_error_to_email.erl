@@ -24,9 +24,10 @@
             ,?MACRO_VALUE(<<"fax.info">>, <<"fax_info">>, <<"Fax Info">>, <<"Fax Info">>)
             ,?MACRO_VALUE(<<"fax.id">>, <<"fax_id">>, <<"Fax ID">>, <<"Fax ID">>)
             ,?MACRO_VALUE(<<"fax.box_id">>, <<"fax_box_id">>, <<"FaxBox ID">>, <<"FaxBox ID">>)
-            ,?MACRO_VALUE(<<"fax.error">>, <<"fax_error">>, <<"Fax Error">>, <<"Fax Error">>)
             ,?MACRO_VALUE(<<"fax.timestamp">>, <<"fax_timestamp">>, <<"Fax Timestamp">>, <<"Fax Timestamp">>)
             ,?MACRO_VALUE(<<"fax.remote_station_id">>, <<"fax_remote_station_id">>, <<"Fax Remote Station ID">>, <<"Fax Remote Station ID">>)
+            ,?MACRO_VALUE(<<"error.call_info">>, <<"error_call_info">>, <<"Fax Call Error">>, <<"Fax Call Error">>)
+            ,?MACRO_VALUE(<<"error.fax_info">>, <<"error_fax_info">>, <<"Fax Processor Error">>, <<"Fax Processor Error">>)
             | ?DEFAULT_CALL_MACROS
            ]
           )).
@@ -46,19 +47,18 @@
 -spec init() -> 'ok'.
 init() ->
     wh_util:put_callid(?MODULE),
-
-    teletype_util:init_template(?TEMPLATE_ID, [{'macros', ?TEMPLATE_MACROS}
-                                               ,{'text', ?TEMPLATE_TEXT}
-                                               ,{'html', ?TEMPLATE_HTML}
-                                               ,{'subject', ?TEMPLATE_SUBJECT}
-                                               ,{'category', ?TEMPLATE_CATEGORY}
-                                               ,{'friendly_name', ?TEMPLATE_NAME}
-                                               ,{'to', ?TEMPLATE_TO}
-                                               ,{'from', ?TEMPLATE_FROM}
-                                               ,{'cc', ?TEMPLATE_CC}
-                                               ,{'bcc', ?TEMPLATE_BCC}
-                                               ,{'reply_to', ?TEMPLATE_REPLY_TO}
-                                              ]).
+    teletype_templates:init(?TEMPLATE_ID, [{'macros', ?TEMPLATE_MACROS}
+                                           ,{'text', ?TEMPLATE_TEXT}
+                                           ,{'html', ?TEMPLATE_HTML}
+                                           ,{'subject', ?TEMPLATE_SUBJECT}
+                                           ,{'category', ?TEMPLATE_CATEGORY}
+                                           ,{'friendly_name', ?TEMPLATE_NAME}
+                                           ,{'to', ?TEMPLATE_TO}
+                                           ,{'from', ?TEMPLATE_FROM}
+                                           ,{'cc', ?TEMPLATE_CC}
+                                           ,{'bcc', ?TEMPLATE_BCC}
+                                           ,{'reply_to', ?TEMPLATE_REPLY_TO}
+                                          ]).
 
 -spec handle_fax_outbound_error(wh_json:object(), wh_proplist()) -> 'ok'.
 handle_fax_outbound_error(JObj, _Props) ->
@@ -71,29 +71,18 @@ handle_fax_outbound_error(JObj, _Props) ->
     DataJObj = wh_json:normalize(JObj),
     AccountId = wh_json:get_value(<<"account_id">>, DataJObj),
 
-    case teletype_util:should_handle_notification(DataJObj)
-        andalso teletype_util:is_notice_enabled(AccountId, JObj, ?TEMPLATE_ID)
-    of
+    case teletype_util:is_notice_enabled(AccountId, JObj, ?TEMPLATE_ID) of
         'false' -> lager:debug("notification handling not configured for this account");
         'true' -> process_req(DataJObj)
     end.
 
 -spec process_req(wh_json:object()) -> 'ok'.
 process_req(DataJObj) ->
-    FaxJObj = teletype_fax_util:get_fax_doc(DataJObj),
-    OwnerJObj = get_owner_doc(FaxJObj, DataJObj),
-
     Macros = build_template_data(
-               wh_json:set_values([{<<"account">>, teletype_util:account_params(DataJObj)}
-                                   ,{<<"fax">>, wh_doc:public_fields(FaxJObj)}
-                                   ,{<<"owner">>, wh_doc:public_fields(OwnerJObj)}
-                                   ,{<<"error">>, error_data(DataJObj)}
-                                  ]
-                                  ,DataJObj
-                                 )),
+               wh_json:set_values([{<<"error">>, error_data(DataJObj)}], DataJObj)),
 
     %% Load templates
-    Templates = teletype_util:fetch_templates(?TEMPLATE_ID, DataJObj),
+    Templates = teletype_templates:fetch(?TEMPLATE_ID, DataJObj),
 
     %% Populate templates
     RenderedTemplates = [{ContentType, teletype_util:render(?TEMPLATE_ID, Template, Macros)}
@@ -102,7 +91,7 @@ process_req(DataJObj) ->
                         ],
     lager:debug("rendered templates"),
 
-    {'ok', TemplateMetaJObj} = teletype_util:fetch_template_meta(?TEMPLATE_ID, teletype_util:find_account_id(DataJObj)),
+    {'ok', TemplateMetaJObj} = teletype_templates:fetch_meta(?TEMPLATE_ID, teletype_util:find_account_id(DataJObj)),
 
     Subject = teletype_util:render_subject(
                 wh_json:find(<<"subject">>, [DataJObj, TemplateMetaJObj], ?TEMPLATE_SUBJECT)
@@ -114,7 +103,7 @@ process_req(DataJObj) ->
         case teletype_util:is_preview(DataJObj) of
             'true' -> DataJObj;
             'false' ->
-                wh_json:set_value(<<"to">>, to_email_addresses(FaxJObj), DataJObj)
+                wh_json:set_value(<<"to">>, to_email_addresses(DataJObj), DataJObj)
         end,
 
     Emails = teletype_util:find_addresses(EmailsJObj
@@ -143,17 +132,9 @@ error_data(DataJObj) ->
               ])
     end.
 
--spec get_owner_doc(wh_json:object(), wh_json:object()) -> wh_json:object().
-get_owner_doc(FaxJObj, DataJObj) ->
-    OwnerId = wh_json:get_value(<<"owner_id">>, FaxJObj),
-    case teletype_util:open_doc(<<"user">>, OwnerId, DataJObj) of
-        {'ok', OwnerJObj} -> OwnerJObj;
-        {'error', _} -> wh_json:new()
-    end.
-
 -spec build_template_data(wh_json:object()) -> wh_proplist().
 build_template_data(DataJObj) ->
-    [{<<"account">>, teletype_util:public_proplist(<<"account">>, DataJObj)}
+    [{<<"account">>, teletype_util:account_params(DataJObj)}
      ,{<<"fax">>, build_fax_template_data(DataJObj)}
      ,{<<"system">>, teletype_util:system_params()}
      ,{<<"caller_id">>, caller_id_data(DataJObj)}
@@ -162,6 +143,7 @@ build_template_data(DataJObj) ->
      ,{<<"from">>, from_data(DataJObj)}
      ,{<<"to">>, to_data(DataJObj)}
      ,{<<"call_id">>, wh_json:get_value(<<"call_id">>, DataJObj)}
+     ,{<<"error">>, wh_json:to_proplist(<<"error">>, DataJObj)}
     ].
 
 -spec caller_id_data(wh_json:object()) -> wh_proplist().
@@ -248,7 +230,7 @@ default_to_addresses() ->
 build_fax_template_data(DataJObj) ->
     props:filter_undefined(
       [{<<"id">>, wh_json:get_value(<<"fax_id">>, DataJObj)}
-       ,{<<"info">>, wh_json:get_value(<<"fax_info">>, DataJObj)}
+       ,{<<"info">>, wh_json:to_proplist(<<"fax_info">>, DataJObj)}
        ,{<<"box_id">>, wh_json:get_value(<<"faxbox_id">>, DataJObj)}
        ,{<<"timestamp">>, wh_json:get_value(<<"fax_timestamp">>, DataJObj)}
        ,{<<"notifications">>, wh_json:get_value(<<"fax_notifications">>, DataJObj)}

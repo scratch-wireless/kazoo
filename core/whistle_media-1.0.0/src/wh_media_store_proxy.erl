@@ -19,7 +19,7 @@
                   {'ok', cowboy_req:req(), ne_binaries()} |
                   {'shutdown',  cowboy_req:req(), 'ok'}.
 init({_Transport, _Proto}, Req0, _Opts) ->
-    put('callid', wh_util:rand_hex_binary(16)),
+    wh_util:put_callid(wh_util:rand_hex_binary(16)),
     case cowboy_req:path_info(Req0) of
         {[_, _, _]=PathTokens, Req1} ->
             is_authentic(PathTokens, Req1);
@@ -212,7 +212,7 @@ try_to_store(Db, Id, Attachment, CT, Req0) ->
 -spec maybe_resolve_conflict(ne_binary(), ne_binary(), ne_binary(), binary(), wh_proplist(), cowboy_req:req()) ->
                                     {'ok', cowboy_req:req(), 'ok'}.
 maybe_resolve_conflict(DbName, Id, Attachment, Contents, Options, Req0) ->
-    timer:sleep(5000),
+    timer:sleep(5 * ?MILLISECONDS_IN_SECOND),
     lager:debug("putting ~s onto ~s(~s): ~-800p", [Attachment, Id, DbName, Options]),
     case couch_mgr:put_attachment(DbName, Id, Attachment, Contents, Options) of
         {'ok', JObj} ->

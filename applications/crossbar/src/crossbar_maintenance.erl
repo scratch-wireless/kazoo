@@ -91,6 +91,7 @@ migrate_accounts_data([Account|Accounts]) ->
 migrate_account_data(Account) ->
     _ = cb_clicktocall:maybe_migrate_history(Account),
     _ = migrate_ring_group_callflow(Account),
+    _ = cb_vmboxes:migrate(Account),
     'no_return'.
 
 -spec add_missing_modules(atoms(), atoms()) -> 'no_return'.
@@ -110,7 +111,7 @@ add_missing_modules(Modules, MissingModules) ->
 -spec refresh(input_term()) -> 'ok'.
 
 refresh() ->
-    io:format("please use whapps_maintenance:refresh().", []).
+    io:format("please use whapps_maintenance:refresh().").
 
 refresh(Value) ->
     io:format("please use whapps_maintenance:refresh(~p).", [Value]).
@@ -126,7 +127,7 @@ flush() ->
 %%
 %% @end
 %%--------------------------------------------------------------------
--spec start_module(text()) -> 'ok' | {'error', _}.
+-spec start_module(text()) -> 'ok'.
 start_module(Module) ->
     try crossbar:start_mod(Module) of
         _ -> maybe_autoload_module(wh_util:to_binary(Module))
@@ -160,7 +161,7 @@ persist_module(Module, Mods) ->
 %%
 %% @end
 %%--------------------------------------------------------------------
--spec stop_module(text()) -> 'ok' | {'error', _}.
+-spec stop_module(text()) -> 'ok'.
 stop_module(Module) ->
     try crossbar:stop_mod(Module) of
         _ ->
@@ -189,7 +190,7 @@ running_modules() -> crossbar_bindings:modules_loaded().
 %%--------------------------------------------------------------------
 -spec find_account_by_number(input_term()) ->
                                     {'ok', ne_binary()} |
-                                    {'error', term()}.
+                                    {'error', _}.
 find_account_by_number(Number) when not is_binary(Number) ->
     find_account_by_number(wh_util:to_binary(Number));
 find_account_by_number(Number) ->
@@ -217,7 +218,7 @@ find_account_by_number(Number) ->
 -spec find_account_by_name(input_term()) ->
                                   {'ok', ne_binary()} |
                                   {'multiples', [ne_binary(),...]} |
-                                  {'error', term()}.
+                                  {'error', _}.
 find_account_by_name(Name) when not is_binary(Name) ->
     find_account_by_name(wh_util:to_binary(Name));
 find_account_by_name(Name) ->
@@ -245,7 +246,7 @@ find_account_by_name(Name) ->
 -spec find_account_by_realm(input_term()) ->
                                    {'ok', ne_binary()} |
                                    {'multiples', [ne_binary(),...]} |
-                                   {'error', term()}.
+                                   {'error', _}.
 find_account_by_realm(Realm) when not is_binary(Realm) ->
     find_account_by_realm(wh_util:to_binary(Realm));
 find_account_by_realm(Realm) ->
@@ -492,7 +493,7 @@ create_account(Context) ->
         _Status ->
             Errors = cb_context:resp_data(Context1),
             io:format("failed to create account: '~s'~n", [wh_json:encode(Errors)]),
-            AccountId = wh_json:get_value(<<"_id">>, cb_context:req_data(Context)),
+            AccountId = wh_doc:id(cb_context:req_data(Context)),
             couch_mgr:db_delete(wh_util:format_account_id(AccountId, 'encoded')),
             {'error', Errors}
     end.
@@ -511,7 +512,7 @@ create_user(Context) ->
     case cb_context:resp_status(Context1) of
         'success' ->
             io:format("created new account admin user '~s'~n"
-                      ,[wh_json:get_value(<<"_id">>, cb_context:doc(Context1))]
+                      ,[wh_doc:id(cb_context:doc(Context1))]
                      ),
             {'ok', Context1};
         _Status ->
@@ -526,29 +527,29 @@ create_user(Context) ->
 %%
 %% @end
 %%--------------------------------------------------------------------
--spec update_account(input_term(), ne_binary(), term()) ->
+-spec update_account(input_term(), ne_binary(), _) ->
                             {'ok', wh_json:object()} |
-                            {'error', term()}.
+                            {'error', _}.
 update_account(AccountId, Key, Value) when not is_binary(AccountId) ->
     update_account(wh_util:to_binary(AccountId), Key, Value);
 update_account(AccountId, Key, Value) ->
-    AccountDb = wh_util:format_account_id(AccountId, 'encoded'),
     Updaters = [fun({'error', _}=E) -> E;
                    ({'ok', J}) ->
+                        AccountDb = wh_util:format_account_id(AccountId, 'encoded'),
                         couch_mgr:save_doc(AccountDb, wh_json:set_value(Key, Value, J))
                 end
                 ,fun({'error', _}=E) -> E;
                     ({'ok', J}) ->
                          case couch_mgr:lookup_doc_rev(?WH_ACCOUNTS_DB, AccountId) of
                              {'ok', Rev} ->
-                                 couch_mgr:save_doc(?WH_ACCOUNTS_DB, wh_json:set_value(<<"_rev">>, Rev, J));
+                                 couch_mgr:save_doc(?WH_ACCOUNTS_DB, wh_doc:set_revision(J, Rev));
                              {'error', 'not_found'} ->
-                                 couch_mgr:save_doc(?WH_ACCOUNTS_DB, wh_json:delete_key(<<"_rev">>, J))
+                                 couch_mgr:save_doc(?WH_ACCOUNTS_DB, wh_doc:delete_revision(J))
                          end
                  end
                ],
     lists:foldl(fun(F, J) -> F(J) end
-                ,couch_mgr:open_cache_doc(AccountDb, AccountId)
+                ,kz_account:fetch(AccountId)
                 ,Updaters
                ).
 
@@ -639,7 +640,7 @@ get_migrateable_ring_group_callflow(JObj, Acc, AccountDb) ->
     of
         {'undefined', _} -> Acc;
         {_, 'undefined'} ->
-            Id = wh_json:get_value(<<"id">>, JObj),
+            Id = wh_doc:id(JObj),
             case couch_mgr:open_cache_doc(AccountDb, Id) of
                 {'ok', CallflowJObj} -> check_callflow_eligibility(CallflowJObj, Acc);
                 {'error', _M} ->
@@ -664,15 +665,15 @@ create_new_ring_group_callflow(JObj) ->
 
 -spec base_group_ring_group(wh_json:object()) -> wh_json:object().
 base_group_ring_group(JObj) ->
-    io:format("migrating callflow ~s: ~s~n", [wh_json:get_value(<<"_id">>, JObj), wh_json:encode(JObj)]),
+    io:format("migrating callflow ~s: ~s~n", [wh_doc:id(JObj), wh_json:encode(JObj)]),
     BaseGroup = wh_json:from_list(
                   props:filter_undefined(
                     [{<<"pvt_vsn">>, <<"1">>}
                      ,{<<"pvt_type">>, <<"callflow">>}
                      ,{<<"pvt_modified">>, wh_util:current_tstamp()}
                      ,{<<"pvt_created">>, wh_util:current_tstamp()}
-                     ,{<<"pvt_account_db">>, wh_json:get_value(<<"pvt_account_db">>, JObj)}
-                     ,{<<"pvt_account_id">>, wh_json:get_value(<<"pvt_account_id">>, JObj)}
+                     ,{<<"pvt_account_db">>, wh_doc:account_db(JObj)}
+                     ,{<<"pvt_account_id">>, wh_doc:account_id(JObj)}
                      ,{<<"flow">>, wh_json:from_list([{<<"children">>, wh_json:new()}
                                                       ,{<<"module">>, <<"ring_group">>}
                                                      ])
@@ -716,7 +717,7 @@ set_ui_metadata(JObj, BaseGroup) ->
 
 -spec save_new_ring_group_callflow(wh_json:object(), wh_json:object()) -> 'ok'.
 save_new_ring_group_callflow(JObj, NewCallflow) ->
-    AccountDb = wh_json:get_value(<<"pvt_account_db">>, JObj),
+    AccountDb = wh_doc:account_db(JObj),
     Name = wh_json:get_value(<<"name">>, NewCallflow),
     case check_if_callflow_exist(AccountDb, Name) of
         'true' ->
@@ -729,7 +730,7 @@ save_new_ring_group_callflow(JObj, NewCallflow, AccountDb) ->
     case couch_mgr:save_doc(AccountDb, NewCallflow) of
         {'error', _M} ->
             io:format("unable to save new callflow (old:~p) in ~p aborting...~n"
-                      ,[wh_json:get_value(<<"_id">>, JObj), AccountDb]
+                      ,[wh_doc:id(JObj), AccountDb]
                      );
         {'ok', NewJObj} ->
             io:format("  saved base group callflow: ~s~n", [wh_json:encode(NewJObj)]),
@@ -772,7 +773,7 @@ update_old_ring_group_metadata(JObj, _NewCallflow) ->
 
 -spec update_old_ring_group_flow(wh_json:object(), wh_json:object()) -> wh_json:object().
 update_old_ring_group_flow(JObj, NewCallflow) ->
-    Data = wh_json:from_list([{<<"id">>, wh_json:get_value(<<"_id">>, NewCallflow)}]),
+    Data = wh_json:from_list([{<<"id">>, wh_doc:id(NewCallflow)}]),
     case wh_json:get_value([<<"flow">>, <<"module">>], JObj) of
         <<"ring_group">> ->
             Flow = wh_json:get_value(<<"flow">>, JObj),
@@ -788,24 +789,25 @@ update_old_ring_group_flow(JObj, NewCallflow) ->
 
 -spec save_old_ring_group(wh_json:object(), wh_json:object()) -> 'ok'.
 save_old_ring_group(JObj, NewCallflow) ->
-    AccountDb = wh_json:get_value(<<"pvt_account_db">>, JObj),
+    AccountDb = wh_doc:account_db(JObj),
     case couch_mgr:save_doc(AccountDb, JObj) of
         {'error', _M} ->
-            L = [wh_json:get_value(<<"_id">>, JObj), AccountDb, wh_json:get_value(<<"_id">>, NewCallflow)],
-            io:format("unable to save callflow ~p in ~p, removing new one (~p)~n", L),
+            io:format("unable to save callflow ~p in ~p, removing new one (~p)~n"
+                      ,[wh_doc:id(JObj), AccountDb, wh_doc:id(NewCallflow)]
+                     ),
             {'ok', _} = couch_mgr:del_doc(AccountDb, NewCallflow),
             'ok';
         {'ok', _OldJObj} ->
             io:format("  saved ring group callflow: ~s~n", [wh_json:encode(_OldJObj)])
     end.
 
--spec init_apps(ne_binary(), ne_binary()) -> 'ok'.
+-spec init_apps(filelib:dirname(), ne_binary()) -> 'ok'.
 init_apps(AppsPath, AppUrl) ->
     Apps = find_apps(AppsPath),
     InitApp = fun(App) -> init_app(App, AppUrl) end,
     lists:foreach(InitApp, Apps).
 
--spec find_apps(ne_binary()) -> ne_binaries().
+-spec find_apps(filelib:dirname()) -> [file:name()].
 find_apps(AppsPath) ->
     AccFun =
         fun (AppJSONPath, Acc) ->
@@ -815,7 +817,7 @@ find_apps(AppsPath) ->
         end,
     filelib:fold_files(AppsPath, "app\\.json", 'true', AccFun, []).
 
--spec init_app(ne_binary(), ne_binary()) -> 'ok'.
+-spec init_app(file:filename(), ne_binary()) -> 'ok'.
 init_app(AppPath, AppUrl) ->
     io:format("trying to init app from ~s~n", [AppPath]),
     try find_metadata(AppPath) of
@@ -832,8 +834,8 @@ init_app(AppPath, AppUrl) ->
             io:format("  failed to find metadata in ~s: ~p~n", [AppPath, _E])
     end.
 
--spec maybe_create_app(ne_binary(), wh_json:object()) -> 'ok'.
--spec maybe_create_app(ne_binary(), wh_json:object(), ne_binary()) -> 'ok'.
+-spec maybe_create_app(file:filename(), wh_json:object()) -> 'ok'.
+-spec maybe_create_app(file:filename(), wh_json:object(), ne_binary()) -> 'ok'.
 maybe_create_app(AppPath, MetaData) ->
     {'ok', MasterAccountDb} = whapps_util:get_master_account_db(),
     maybe_create_app(AppPath, MetaData, MasterAccountDb).
@@ -855,7 +857,7 @@ find_app(Db, Name) ->
         {'error', _}=E -> E
     end.
 
--spec create_app(ne_binary(), wh_json:object(), ne_binary()) -> 'ok'.
+-spec create_app(file:filename(), wh_json:object(), ne_binary()) -> 'ok'.
 create_app(AppPath, MetaData, MasterAccountDb) ->
     Doc = wh_json:delete_keys([<<"source_url">>]
                               ,wh_doc:update_pvt_parameters(MetaData, MasterAccountDb, [{'type', <<"app">>}])
@@ -870,7 +872,7 @@ create_app(AppPath, MetaData, MasterAccountDb) ->
             io:format(" failed to save app ~s to ~s: ~p~n", [wh_json:get_value(<<"name">>, MetaData), MasterAccountDb, _E])
     end.
 
--spec maybe_add_icons(ne_binary(), ne_binary(), ne_binary()) -> 'ok'.
+-spec maybe_add_icons(file:filename(), ne_binary(), ne_binary()) -> 'ok'.
 maybe_add_icons(AppPath, AppId, MasterAccountDb) ->
     try find_icons(AppPath) of
         {'ok', Icons} -> add_icons(AppId, MasterAccountDb, Icons)
@@ -883,35 +885,35 @@ maybe_add_icons(AppPath, AppId, MasterAccountDb) ->
 
 -spec add_icons(ne_binary(), ne_binary(), wh_proplist()) -> 'ok'.
 add_icons(AppId, MasterAccountDb, Icons) ->
-    [add_icon(AppId, MasterAccountDb, IconId, IconData) || {IconId, IconData} <- Icons],
+    _ = [add_icon(AppId, MasterAccountDb, IconId, IconData) || {IconId, IconData} <- Icons],
     'ok'.
 
--spec add_icon(ne_binary(), ne_binary(), ne_binary(), binary()) -> 'ok'.
+-spec add_icon(ne_binary(), ne_binary(), file:filename(), binary()) -> 'ok'.
 add_icon(AppId, MasterAccountDb, IconId, IconData) ->
     case couch_mgr:put_attachment(MasterAccountDb, AppId, IconId, IconData) of
-        {'ok', _} -> io:format("   saved ~s to ~s~n", [IconId, AppId]);
+        {'ok', _} ->     io:format("   saved ~s to ~s~n", [IconId, AppId]);
         {'error', _E} -> io:format("   failed to save ~s to ~s: ~p~n", [IconId, AppId, _E])
     end.
 
--spec find_icons(ne_binary()) -> {'ok', wh_proplist()}.
+-spec find_icons(file:filename()) -> {'ok', [{file:filename(), binary()}]}.
 find_icons(AppPath) ->
     {'ok', Dirs} = file:list_dir(AppPath),
     case lists:member("icon", Dirs) of
-        'true' -> read_icons(filename:join([AppPath, <<"icon">>]));
+        'true' ->  read_icons(filename:join([AppPath, <<"icon">>]));
         'false' -> read_icons(filename:join([AppPath, <<"metadata">>, <<"icon">>]))
     end.
 
--spec read_icons(ne_binary()) -> {'ok', wh_proplist()}.
+-spec read_icons(file:filename()) -> {'ok', [{file:filename(), binary()}]}.
 read_icons(IconPath) ->
     {'ok', Icons} = file:list_dir(IconPath),
     {'ok', [{Icon, read_icon(IconPath, Icon)} || Icon <- Icons]}.
 
--spec read_icon(ne_binary(), ne_binary()) -> binary().
+-spec read_icon(file:filename(), file:filename()) -> binary().
 read_icon(Path, File) ->
     {'ok', IconData} = file:read_file(filename:join([Path, File])),
     IconData.
 
--spec find_metadata(ne_binary()) -> {'ok', wh_json:object()} | {'invalid_data', wh_proplist()}.
+-spec find_metadata(file:filename()) -> {'ok', wh_json:object()} | {'invalid_data', wh_proplist()}.
 find_metadata(AppPath) ->
     AppJSONPath = filename:join([AppPath, <<"metadata">>, <<"app.json">>]),
     {'ok', JSON} = file:read_file(AppJSONPath),
@@ -922,9 +924,3 @@ find_metadata(AppPath) ->
         {'error', Errors} ->
             {'invalid_data', [Error || {'data_invalid', _, Error, _, _} <- Errors]}
     end.
-
--ifdef(TEST).
-
--include_lib("eunit/include/eunit.hrl").
-
--endif.

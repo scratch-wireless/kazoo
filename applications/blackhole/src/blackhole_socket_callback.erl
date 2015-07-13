@@ -19,9 +19,8 @@ open(SessionPid, SessionId, _Opts) ->
     lager:debug("opening socket ~p", [SessionId]),
     {'ok', bh_context:new(SessionPid, SessionId)}.
 
-recv(SessionPid, SessionId, {message, <<>>, Message}, State) ->
+recv(_SessionPid, SessionId, {message, <<>>, Message}, State) ->
     lager:debug("received message ~p on socket ~p", [Message, SessionId]),
-    blackhole_resource:handle_message(Message, SessionId, SessionPid),
     {'ok', State};
 
 recv(_SessionPid, _SessionId, {'event', _Ignore, <<"subscribe">>, SubscriptionJObj}, Context) ->
@@ -49,16 +48,17 @@ recv(_SessionPid, SessionId, Message, Context) ->
 
 close(SessionPid, SessionId, _Context) ->
     lager:debug("closing socket ~p", [SessionId]),
-    blackhole_bindings:filter(fun(Binding, _Module, _Function, BindingContext) ->
-                                      case bh_context:is_context(BindingContext) of
-                                          'false' -> 'true';
-                                          'true' ->
-                                              case not (bh_context:websocket_pid(BindingContext) =:= SessionPid) of
-                                                  'true' -> 'true';
-                                                  'false' ->
-                                                      spawn('blackhole_util', 'remove_binding', [Binding, BindingContext]),
-                                                      'false'
-                                              end
-                                      end
-                              end),
+    blackhole_bindings:filter(
+      fun(Binding, _Module, _Function, BindingContext) ->
+              case bh_context:is_context(BindingContext) of
+                  'false' -> 'true';
+                  'true' ->
+                      case not (bh_context:websocket_pid(BindingContext) =:= SessionPid) of
+                          'true' -> 'true';
+                          'false' ->
+                              _ = wh_util:spawn('blackhole_util', 'remove_binding', [Binding, BindingContext]),
+                              'false'
+                      end
+              end
+      end),
     'ok'.

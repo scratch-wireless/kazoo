@@ -106,7 +106,8 @@ maybe_start_agent(AccountId, AgentId, JObj) ->
                     login_fail(JObj)
             end;
         {'exists', Sup} ->
-            maybe_update_presence(Sup, JObj),
+            FSM = acdc_agent_sup:fsm(Sup),
+            acdc_agent_fsm:update_presence(FSM, presence_id(JObj), presence_state(JObj, 'undefined')),
             login_success(JObj);
         {'error', _E} ->
             acdc_agent_stats:agent_logged_out(AccountId, AgentId),
@@ -163,17 +164,15 @@ maybe_stop_agent(AccountId, AgentId, JObj) ->
             acdc_agent_stats:agent_logged_out(AccountId, AgentId);
         Sup when is_pid(Sup) ->
             lager:debug("agent ~s(~s) is logging out, stopping ~p", [AgentId, AgentId, Sup]),
-            acdc_agent_stats:agent_logged_out(AccountId, AgentId),
+            acdc_agent_stats:agent_pending_logged_out(AccountId, AgentId),
 
-            case catch acdc_agent_sup:listener(Sup) of
+            case catch acdc_agent_sup:fsm(Sup) of
                 APid when is_pid(APid) ->
-                    maybe_update_presence(Sup, JObj, ?PRESENCE_RED_SOLID),
-                    acdc_agent_listener:logout_agent(APid);
-                _P -> lager:debug("failed to find agent listener for ~s: ~p", [AgentId, _P])
-            end,
+                    acdc_agent_fsm:update_presence(APid, presence_id(JObj), presence_state(JObj, ?PRESENCE_RED_SOLID)),
+                    acdc_agent_fsm:agent_logout(APid);
+                _P -> lager:debug("failed to find agent fsm for ~s: ~p", [AgentId, _P])
+            end
 
-            _Stop = acdc_agent_sup:stop(Sup),
-            lager:debug("supervisor ~p stopping agent: ~p", [Sup, _Stop])
     end.
 
 maybe_pause_agent(AccountId, AgentId, Timeout, JObj) ->
@@ -181,8 +180,9 @@ maybe_pause_agent(AccountId, AgentId, Timeout, JObj) ->
         'undefined' -> lager:debug("agent ~s (~s) not found, nothing to do", [AgentId, AccountId]);
         Sup when is_pid(Sup) ->
             lager:debug("agent ~s(~s) is pausing for ~p", [AccountId, AgentId, Timeout]),
-            maybe_update_presence(Sup, JObj),
-            acdc_agent_fsm:pause(acdc_agent_sup:fsm(Sup), Timeout)
+            FSM = acdc_agent_sup:fsm(Sup),
+            acdc_agent_fsm:update_presence(FSM,  presence_id(JObj), presence_state(JObj, 'undefined')),
+            acdc_agent_fsm:pause(FSM, Timeout)
     end.
 
 maybe_resume_agent(AccountId, AgentId, JObj) ->
@@ -190,8 +190,9 @@ maybe_resume_agent(AccountId, AgentId, JObj) ->
         'undefined' -> lager:debug("agent ~s (~s) not found, nothing to do", [AgentId, AccountId]);
         Sup when is_pid(Sup) ->
             lager:debug("agent ~s(~s) is resuming: ~p", [AccountId, AgentId, Sup]),
-            maybe_update_presence(Sup, JObj),
-            acdc_agent_fsm:resume(acdc_agent_sup:fsm(Sup))
+            FSM = acdc_agent_sup:fsm(Sup),
+            acdc_agent_fsm:update_presence(FSM,  presence_id(JObj), presence_state(JObj, 'undefined')),
+            acdc_agent_fsm:resume(FSM)
     end.
 
 -spec handle_sync_req(wh_json:object(), wh_proplist()) -> 'ok'.
@@ -321,8 +322,9 @@ handle_change(JObj, <<"undefined">>) ->
                                  )
     of
         {'ok', Doc} ->
-            lager:debug("found doc of type ~s", [wh_json:get_value(<<"pvt_type">>, Doc)]),
-            handle_change(JObj, wh_json:get_value(<<"pvt_type">>, Doc));
+            Type = wh_doc:type(Doc),
+            lager:debug("found doc of type ~s", [Type]),
+            handle_change(JObj, Type);
         {'error', _E} ->
             lager:debug("failed to find doc")
     end.
@@ -335,7 +337,7 @@ handle_device_change(_AccountDb, _AccountId, DeviceId, Rev, _Type, Cnt) when Cnt
 handle_device_change(AccountDb, AccountId, DeviceId, Rev, <<"doc_created">>, Cnt) ->
     case cf_endpoint:get(DeviceId, AccountDb) of
         {'ok', EP} ->
-            case wh_json:get_value(<<"_rev">>, EP) of
+            case wh_doc:revision(EP) of
                 Rev ->
                     gproc:send(?ENDPOINT_UPDATE_REG(AccountId, DeviceId), ?ENDPOINT_CREATED(EP)),
                     gproc:send(?OWNER_UPDATE_REG(AccountId, wh_json:get_value(<<"owner_id">>, EP)), ?ENDPOINT_CREATED(EP));
@@ -348,7 +350,7 @@ handle_device_change(AccountDb, AccountId, DeviceId, Rev, <<"doc_created">>, Cnt
 handle_device_change(AccountDb, AccountId, DeviceId, Rev, <<"doc_edited">>, Cnt) ->
     case cf_endpoint:get(DeviceId, AccountDb) of
         {'ok', EP} ->
-            case wh_json:get_value(<<"_rev">>, EP) of
+            case wh_doc:revision(EP) of
                 Rev ->
                     gproc:send(?ENDPOINT_UPDATE_REG(AccountId, DeviceId), ?ENDPOINT_EDITED(EP)),
                     gproc:send(?OWNER_UPDATE_REG(AccountId, wh_json:get_value(<<"owner_id">>, EP)), ?ENDPOINT_EDITED(EP));
@@ -361,7 +363,7 @@ handle_device_change(AccountDb, AccountId, DeviceId, Rev, <<"doc_edited">>, Cnt)
 handle_device_change(AccountDb, AccountId, DeviceId, Rev, <<"doc_deleted">>, Cnt) ->
     case cf_endpoint:get(DeviceId, AccountDb) of
         {'ok', EP} ->
-            case wh_json:get_value(<<"_rev">>, EP) of
+            case wh_doc:revision(EP) of
                 Rev ->
                     gproc:send(?ENDPOINT_UPDATE_REG(AccountId, DeviceId), ?ENDPOINT_DELETED(EP)),
                     gproc:send(?OWNER_UPDATE_REG(AccountId, wh_json:get_value(<<"owner_id">>, EP)), ?ENDPOINT_DELETED(EP));

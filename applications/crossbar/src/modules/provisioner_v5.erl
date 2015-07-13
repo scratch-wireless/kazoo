@@ -28,7 +28,7 @@
 %%--------------------------------------------------------------------
 -spec update_device(wh_json:object(), ne_binary()) -> 'ok'.
 update_device(JObj, AuthToken) ->
-    AccountId = wh_json:get_value(<<"pvt_account_id">>, JObj),
+    AccountId = wh_doc:account_id(JObj),
     Request = device_settings(set_owner(JObj)),
     case check_request(Request) of
         {'ok', Data} ->
@@ -48,7 +48,7 @@ delete_device(JObj, AuthToken) ->
     send_req('devices_delete'
              ,'undefined'
              ,AuthToken
-             ,wh_json:get_value(<<"pvt_account_id">>, JObj)
+             ,wh_doc:account_id(JObj)
              ,kz_device:mac_address(JObj)
             ).
 
@@ -58,7 +58,7 @@ device_settings(JObj) ->
       [{<<"brand">>, get_brand(JObj)}
        ,{<<"family">>, get_family(JObj)}
        ,{<<"model">>, get_model(JObj)}
-       ,{<<"name">>, wh_json:get_value(<<"name">>, JObj)}
+       ,{<<"name">>, kz_device:name(JObj)}
        ,{<<"settings">>, settings(JObj)}
       ]
      ).
@@ -122,10 +122,8 @@ delete_account(AccountId, AuthToken) ->
 -spec update_account(ne_binary(), ne_binary()) -> 'ok'.
 update_account(Account, AuthToken) ->
     AccountId = wh_util:format_account_id(Account, 'raw'),
-    AccountDb = wh_util:format_account_id(Account, 'encoded'),
-    case couch_mgr:open_cache_doc(AccountDb, AccountId) of
-        {'ok', JObj} ->
-            update_account(AccountId, JObj, AuthToken);
+    case kz_account:fetch(AccountId) of
+        {'ok', JObj} -> update_account(AccountId, JObj, AuthToken);
         {'error', _R} ->
             lager:debug("unable to fetch account ~s: ~p", [AccountId, _R])
     end.
@@ -144,9 +142,8 @@ account_settings(JObj) ->
 %%--------------------------------------------------------------------
 -spec update_user(ne_binary(), wh_json:object(), ne_binary()) -> 'ok'.
 update_user(AccountId, JObj, AuthToken) ->
-    case wh_json:get_value(<<"pvt_type">>, JObj) of
-        <<"user">> ->
-            save_user(AccountId, JObj, AuthToken);
+    case wh_doc:type(JObj) of
+        <<"user">> -> save_user(AccountId, JObj, AuthToken);
         _ -> 'ok' %% Gets rid of VMbox
     end.
 
@@ -154,8 +151,7 @@ update_user(AccountId, JObj, AuthToken) ->
 save_user(AccountId, JObj, AuthToken) ->
     _ = update_account(AccountId, AuthToken),
     AccountDb = wh_util:format_account_id(AccountId, 'encoded'),
-    OwnerId = wh_json:get_value(<<"id">>, JObj),
-    Devices = crossbar_util:get_devices_by_owner(AccountDb, OwnerId),
+    Devices = crossbar_util:get_devices_by_owner(AccountDb, wh_doc:id(JObj)),
     Settings = settings(JObj),
     lists:foreach(
       fun(Device) ->
@@ -217,16 +213,15 @@ check_MAC(MacAddress, AuthToken) ->
 %%--------------------------------------------------------------------
 -spec set_owner(wh_json:object()) -> wh_json:object().
 set_owner(JObj) ->
-    AccountId = wh_json:get_value(<<"pvt_account_id">>, JObj),
     OwnerId = wh_json:get_ne_value(<<"owner_id">>, JObj),
-    case get_owner(OwnerId, AccountId) of
+    case get_owner(OwnerId, wh_doc:account_id(JObj)) of
         {'ok', Doc} -> wh_json:merge_recursive(Doc, JObj);
         {'error', _R} -> JObj
     end.
 
 -spec get_owner(api_binary(), ne_binary()) ->
                        {'ok', wh_json:object()} |
-                       {'error', any()}.
+                       {'error', _}.
 get_owner('undefined', _) -> {'error', 'undefined'};
 get_owner(OwnerId, AccountId) ->
     AccountDb = wh_util:format_account_id(AccountId, 'encoded'),
@@ -245,9 +240,27 @@ settings(JObj) ->
                ,{<<"codecs">>, settings_codecs(JObj)}
                ,{<<"datetime">>, settings_datetime(JObj)}
                ,{<<"feature_keys">>, settings_feature_keys(JObj)}
+               ,{<<"line_keys">>, settings_line_keys(JObj)}
               ]
              ),
     wh_json:from_list(Props).
+
+-spec settings_line_keys(wh_json:object()) -> wh_json:object().
+settings_line_keys(JObj) ->
+    Brand = get_brand(JObj),
+    Family = get_family(JObj),
+    settings_line_keys(Brand, Family).
+
+-spec settings_line_keys(ne_binary(), ne_binary()) -> wh_json:object().
+settings_line_keys(<<"yealink">>, _) ->
+    Props = props:filter_empty(
+              [{<<"account">>, <<"1">>}
+              ,{<<"type">>, <<"15">>}
+              ]
+             ),
+    Key = wh_json:from_list([{<<"key">>, wh_json:from_list(Props)}]),
+    wh_json:from_list([{<<"0">>, Key}]);
+settings_line_keys(_, _) -> 'undefined'.
 
 -spec settings_lines(wh_json:object()) -> wh_json:object().
 settings_lines(JObj) ->
@@ -258,8 +271,7 @@ settings_lines(JObj) ->
            ])
     of
         [] -> wh_json:new();
-        Props ->
-            wh_json:from_list([{<<"0">>, wh_json:from_list(Props)}])
+        Props -> wh_json:from_list([{<<"0">>, wh_json:from_list(Props)}])
     end.
 
 -spec settings_basic(wh_json:object()) -> wh_json:object().
@@ -314,7 +326,7 @@ settings_feature_keys(JObj) ->
     FeatureKeys = wh_json:get_value([<<"provision">>, <<"feature_keys">>], JObj, wh_json:new()),
     Brand = get_brand(JObj),
     Family = get_family(JObj),
-    AccountId = wh_json:get_value(<<"pvt_account_id">>, JObj),
+    AccountId = wh_doc:account_id(JObj),
     wh_json:foldl(
       fun(Key, Value, Acc) ->
               Type = wh_json:get_binary_value(<<"type">>, Value),
@@ -330,16 +342,14 @@ settings_feature_keys(JObj) ->
                              api_object().
 get_feature_key(<<"presence">> = Type, Value, Brand, Family, AccountId) ->
     {'ok', UserJObj} = get_user(AccountId, Value),
-    case wh_json:get_value(<<"presence_id">>, UserJObj) of
+    case kz_device:presence_id(UserJObj) of
         'undefined' -> 'undefined';
         Presence ->
-            First = wh_json:get_value(<<"first_name">>, UserJObj),
-            Last = wh_json:get_value(<<"last_name">>, UserJObj),
-
             wh_json:from_list(
-              [{<<"label">>, <<First/binary, " ", Last/binary>>}
+              [{<<"label">>, <<>>}
                ,{<<"value">>, Presence}
                ,{<<"type">>, get_feature_key_type(Type, Brand, Family)}
+               ,{<<"account">>, get_line_key(Brand, Family)}
               ])
     end;
 get_feature_key(<<"speed_dial">> = Type, Value, Brand, Family, _AccountId) ->
@@ -347,28 +357,31 @@ get_feature_key(<<"speed_dial">> = Type, Value, Brand, Family, _AccountId) ->
       [{<<"label">>, Value}
        ,{<<"value">>, Value}
        ,{<<"type">>, get_feature_key_type(Type, Brand, Family)}
+       ,{<<"account">>, get_line_key(Brand, Family)}
       ]);
 get_feature_key(<<"personal_parking">> = Type, Value, Brand, Family, AccountId) ->
     {'ok', UserJObj} = get_user(AccountId, Value),
-    Presence = wh_json:get_value(<<"presence_id">>, UserJObj),
-    case wh_json:get_value(<<"presence_id">>, UserJObj) of
+    case kz_device:presence_id(UserJObj) of
         'undefined' -> 'undefined';
         Presence ->
-            First = wh_json:get_value(<<"first_name">>, UserJObj),
-            Last = wh_json:get_value(<<"last_name">>, UserJObj),
-
             wh_json:from_list(
-              [{<<"label">>, <<"Park ", First/binary, " ", Last/binary>>}
+              [{<<"label">>, <<>>}
                ,{<<"value">>, <<"*3", Presence/binary>>}
                ,{<<"type">>, get_feature_key_type(Type, Brand, Family)}
+               ,{<<"account">>, get_line_key(Brand, Family)}
               ])
     end;
 get_feature_key(<<"parking">> = Type, Value, Brand, Family, _AccountId) ->
     wh_json:from_list(
-      [{<<"label">>, <<"Park ", Value/binary>>}
+      [{<<"label">>, <<>>}
        ,{<<"value">>, <<"*3", Value/binary>>}
        ,{<<"type">>, get_feature_key_type(Type, Brand, Family)}
+       ,{<<"account">>, get_line_key(Brand, Family)}
       ]).
+
+-spec get_line_key(ne_binary(), ne_binary()) -> api_binary().
+get_line_key(<<"yealink">>, _) -> <<"0">>;
+get_line_key(_, _) -> 'undefined'.
 
 -spec get_feature_key_type(ne_binary(), binary(), binary()) -> api_object().
 get_feature_key_type(Type, Brand, Family) ->
@@ -423,6 +436,7 @@ settings_audio(JObj) ->
 
 -spec settings_audio(ne_binaries(), ne_binaries(), wh_json:object()) -> wh_json:object().
 settings_audio([], _, JObj) -> JObj;
+settings_audio(_, [], JObj) -> JObj;
 settings_audio([Codec|Codecs], [Key|Keys], JObj) ->
     settings_audio(Codecs, Keys, wh_json:set_value(Key, Codec, JObj)).
 
@@ -441,7 +455,7 @@ send_req('devices_post', JObj, AuthToken, AccountId, MACAddress) ->
     UrlString = req_uri('devices', AccountId, MACAddress),
     lager:debug("provisioning via ~s: ~s", [UrlString, Data]),
     Resp = ibrowse:send_req(UrlString, Headers, 'post', Data, HTTPOptions),
-    handle_device_resp(JObj, Resp, AccountId);
+    handle_resp(Resp);
 send_req('devices_delete', _, AuthToken, AccountId, MACAddress) ->
     Headers = req_headers(AuthToken),
     HTTPOptions = [],
@@ -487,9 +501,9 @@ account_payload(JObj, AccountId) ->
     ResellerId = wh_services:find_reseller_id(AccountId),
     wh_json:from_list(
       [{<<"create_if_missing">>, 'true'}
-      ,{<<"reseller_id">>, ResellerId}
-      ,{<<"merge">>, 'true'}
-      ,{<<"data">>, JObj}
+       ,{<<"reseller_id">>, ResellerId}
+       ,{<<"merge">>, 'true'}
+       ,{<<"data">>, JObj}
       ]
      ).
 
@@ -502,45 +516,6 @@ device_payload(JObj) ->
        ,{<<"data">>, JObj}
       ]
      ).
-
--spec handle_device_resp(wh_json:object(), ibrowse_ret(), ne_binary()) -> 'ok'.
-handle_device_resp(Req, {'ok', "200", _, _}=Resp, AccountId) ->
-    Lines = wh_json:get_value([<<"settings">>, <<"lines">>], Req, wh_json:new()),
-    wh_json:foldl(
-        fun(_Line, LineData, Acc) ->
-            maybe_publish_check_sync(LineData, AccountId),
-            Acc
-        end
-        ,'ok'
-        ,Lines
-    ),
-    handle_resp(Resp);
-handle_device_resp(_Req, Resp, _AccountId) ->
-    handle_resp(Resp).
-
--spec maybe_publish_check_sync(wh_json:object(), ne_binary()) -> 'ok'.
--spec maybe_publish_check_sync(api_binary(), api_binary(), ne_binary()) -> 'ok'.
-maybe_publish_check_sync(LineData, AccountId) ->
-    lager:debug("maybe sending check sync"),
-    maybe_publish_check_sync(
-      wh_json:get_value([<<"sip">>, <<"realm">>], LineData)
-      ,wh_json:get_value([<<"sip">>, <<"username">>], LineData)
-      ,AccountId
-     ).
-
-maybe_publish_check_sync('undefined', Username, AccountId) ->
-    Realm = crossbar_util:get_account_realm(AccountId),
-    lager:debug("using account realm ~s", [Realm]),
-    maybe_publish_check_sync(Realm, Username, AccountId);
-maybe_publish_check_sync(_Realm, 'undefined', _) ->
-    lager:warning("did not send check sync username is undefined");
-maybe_publish_check_sync(Realm, Username, _) ->
-    lager:debug("sending check sync for ~s @ ~s", [Username, Realm]),
-    Req = [{<<"Realm">>, Realm}
-           ,{<<"Username">>, Username}
-           | wh_api:default_headers(?APP_NAME, ?APP_VERSION)
-          ],
-    wh_amqp_worker:cast(Req, fun wapi_switch:publish_check_sync/1).
 
 -spec handle_resp(ibrowse_ret()) -> 'ok'.
 handle_resp({'ok', "200", _, Resp}) ->

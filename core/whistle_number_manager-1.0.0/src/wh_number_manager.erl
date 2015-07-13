@@ -142,9 +142,7 @@ lookup_account_by_number(Num) ->
         {'error', 'not_found'} ->
             case fetch_account_by_number(Number) of
                 {'ok', _, _}=Ok ->
-                    CacheProps = [{'origin', [{'db', wnm_util:number_to_db_name(Number), Number}
-                                              ,{'type', <<"number">>}
-                                             ]}],
+                    CacheProps = [{'origin', [{'db', wnm_util:number_to_db_name(Number), Number}]}],
                     wh_cache:store_local(?WNM_NUMBER_CACHE, Key, Ok, CacheProps),
                     Ok;
                 Else -> Else
@@ -368,8 +366,7 @@ check_ports(#number{number=MaybePortNumber}=Number) ->
     case wnm_number:find_port_in_number(Number) of
         {'ok', PortDoc} ->
             lager:debug("found port doc with number ~s for account ~s"
-                        ,[MaybePortNumber, wh_json:get_value(<<"pvt_account_id">>, PortDoc)]
-                       ),
+                        ,[MaybePortNumber, wh_doc:account_id(PortDoc)]),
             wnm_number:number_from_port_doc(Number, PortDoc);
         {'error', 'not_found'} ->
             lager:debug("number not found in ports"),
@@ -474,10 +471,7 @@ is_number_porting(N) ->
 -spec account_can_create_number(ne_binary() | 'system') -> boolean().
 account_can_create_number('system') -> 'true';
 account_can_create_number(Account) ->
-    AccountId = wh_util:format_account_id(Account, 'raw'),
-    AccountDb = wh_util:format_account_id(Account, 'encoded'),
-
-    {'ok', JObj} = couch_mgr:open_cache_doc(AccountDb, AccountId),
+    {'ok', JObj} = kz_account:fetch(Account),
     kz_account:allow_number_additions(JObj).
 
 %%--------------------------------------------------------------------
@@ -600,7 +594,7 @@ free_numbers(AccountId) ->
     AccountDb = wh_util:format_account_id(AccountId, 'encoded'),
     case couch_mgr:open_doc(AccountDb, ?WNM_PHONE_NUMBER_DOC) of
         {'ok', JObj} ->
-            _ = [release_number(Key, AccountId)
+            _ = [release_number(Key, 'system')
                  || Key <- wh_json:get_keys(wh_json:public_fields(JObj))
                         ,wnm_util:is_reconcilable(Key)
                 ],
@@ -730,7 +724,7 @@ assign_number_to_account(Number, AssignTo, AuthBy, PublicFields, DryRun) ->
 %% recycled or cancled after a buffer period
 %% @end
 %%--------------------------------------------------------------------
--spec release_number(ne_binary(), ne_binary()) -> operation_return().
+-spec release_number(ne_binary(), 'system' | ne_binary()) -> operation_return().
 release_number(Number, AuthBy) ->
     lager:debug("attempting to release ~s", [Number]),
     Routines = [fun(_) -> wnm_number:get(Number) end
@@ -845,7 +839,7 @@ put_attachment(Number, Name, Content, Options, AuthBy) ->
                     (#number{number=Num, number_doc=JObj}) ->
                          lager:debug("attempting to put attachement ~s", [Name]),
                          Db = wnm_util:number_to_db_name(Num),
-                         Rev = wh_json:get_value(<<"_rev">>, JObj),
+                         Rev = wh_doc:revision(JObj),
                          couch_mgr:put_attachment(Db, Num, Name, Content, [{'rev', Rev}|Options])
                  end
                ],

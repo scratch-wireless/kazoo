@@ -265,7 +265,7 @@ to_api_props(Channel) ->
 %% @end
 %%--------------------------------------------------------------------
 init([Node, Options]) ->
-    put('callid', Node),
+    wh_util:put_callid(Node),
     lager:info("starting new fs channel listener for ~s", [Node]),
     gen_server:cast(self(), 'bind_to_events'),
     {'ok', #state{node=Node, options=Options}}.
@@ -325,10 +325,10 @@ handle_cast(_Msg, State) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_info({'event', [UUID | Props]}, #state{node=Node}=State) ->
-    _ = spawn(?MODULE, 'process_event', [UUID, Props, Node, self()]),
+    _ = wh_util:spawn(?MODULE, 'process_event', [UUID, Props, Node, self()]),
     {'noreply', State};
 handle_info({'fetch', 'channels', <<"channel">>, <<"uuid">>, UUID, FetchId, _}, #state{node=Node}=State) ->
-    spawn(?MODULE, 'handle_channel_req', [UUID, FetchId, Node, self()]),
+    _ = wh_util:spawn(?MODULE, 'handle_channel_req', [UUID, FetchId, Node, self()]),
     {'noreply', State};
 handle_info({_Fetch, _Section, _Something, _Key, _Value, ID, _Data}, #state{node=Node}=State) ->
     lager:debug("unhandled fetch from section ~s for ~s:~s", [_Section, _Something, _Key]),

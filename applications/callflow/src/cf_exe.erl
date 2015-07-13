@@ -121,6 +121,7 @@ branch(Flow, Call) ->
     Srv = whapps_call:kvs_fetch('consumer_pid', Call),
     branch(Flow, Srv).
 
+-spec add_event_listener(whapps_call:call() | pid(), {atom(), list()}) -> 'ok'.
 add_event_listener(Srv, {_,_}=SpawnInfo) when is_pid(Srv) ->
     gen_listener:cast(Srv, {'add_event_listener', SpawnInfo});
 add_event_listener(Call, {_,_}=SpawnInfo) ->
@@ -166,7 +167,7 @@ callid_update(CallId, Call) ->
 
 callid(Srv) when is_pid(Srv) ->
     CallId = gen_server:call(Srv, 'callid', 1000),
-    put('callid', CallId),
+    wh_util:put_callid(CallId),
     CallId;
 callid(Call) ->
     Srv = whapps_call:kvs_fetch('consumer_pid', Call),
@@ -257,7 +258,7 @@ send_amqp(Call, API, PubFun) when is_function(PubFun, 1) ->
 init([Call]) ->
     process_flag('trap_exit', 'true'),
     CallId = whapps_call:call_id(Call),
-    put('callid', CallId),
+    wh_util:put_callid(CallId),
     gen_listener:cast(self(), 'initialize'),
     {'ok', #state{call=Call}}.
 
@@ -369,7 +370,7 @@ handle_cast({'branch', NewFlow}, #state{flow=Flow, flows=Flows}=State) ->
     NewFlows = [wh_json:get_value([<<"children">>, <<"_">>], Flow, wh_json:new())|Flows],
     {'noreply', launch_cf_module(State#state{flow=NewFlow, flows=NewFlows})};
 handle_cast({'callid_update', NewCallId}, #state{call=Call}=State) ->
-    put('callid', NewCallId),
+    wh_util:put_callid(NewCallId),
     PrevCallId = whapps_call:call_id_direct(Call),
     lager:info("updating callid to ~s (from ~s), catch you on the flip side", [NewCallId, PrevCallId]),
     lager:info("removing call event bindings for ~s", [PrevCallId]),
@@ -399,7 +400,7 @@ handle_cast('initialize', #state{call=Call}) ->
                 ,fun(C) -> whapps_call:control_queue_helper(fun cf_exe:control_queue/2, C) end
                ],
     CallWithHelpers = lists:foldr(fun(F, C) -> F(C) end, Call, Updaters),
-    spawn('cf_singular_call_hooks', 'maybe_hook_call', [CallWithHelpers]),
+    _ = wh_util:spawn('cf_singular_call_hooks', 'maybe_hook_call', [CallWithHelpers]),
     {'noreply', #state{call=CallWithHelpers
                        ,flow=Flow
                       }};
@@ -644,7 +645,7 @@ spawn_cf_module(CFModule, Data, Call) ->
     {spawn_monitor(
        fun() ->
                _ = wh_amqp_channel:consumer_pid(AMQPConsumer),
-               put('callid', whapps_call:call_id_direct(Call)),
+               wh_util:put_callid(whapps_call:call_id_direct(Call)),
                try CFModule:handle(Data, Call) of
                    Result -> Result
                catch

@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%%% @copyright (C) 2011-2013, 2600Hz
+%%% @copyright (C) 2011-2015, 2600Hz
 %%% @doc
 %%%
 %%% Handle CRUD operations for Directories
@@ -155,7 +155,7 @@ load_directory_users(Id, Context) ->
         'success' ->
             Users = cb_context:resp_data(Context1),
             Directory = cb_context:resp_data(Context),
-            cb_context:set_resp_data(Context1, wh_json:set_value(<<"users">>, Users, Directory));
+            cb_context:set_resp_data(Context, wh_json:set_value(<<"users">>, Users, Directory));
         _Status -> Context
     end.
 
@@ -191,7 +191,7 @@ validate_patch(DocId, Context) ->
 -spec on_successful_validation(api_binary(), cb_context:context()) -> cb_context:context().
 on_successful_validation('undefined', Context) ->
     cb_context:set_doc(Context
-                       ,wh_json:set_value(<<"pvt_type">>, <<"directory">>, cb_context:doc(Context))
+                       ,wh_doc:set_type(cb_context:doc(Context), <<"directory">>)
                       );
 on_successful_validation(DocId, Context) ->
     crossbar_doc:load_merge(DocId, Context).
@@ -219,7 +219,7 @@ normalize_view_results(JObj, Acc) ->
 
 -spec normalize_users_results(wh_json:object(), wh_json:objects()) -> wh_json:objects().
 normalize_users_results(JObj, Acc) ->
-    [wh_json:from_list([{<<"user_id">>, wh_json:get_value(<<"id">>, JObj)}
+    [wh_json:from_list([{<<"user_id">>, wh_doc:id(JObj)}
                         ,{<<"callflow_id">>, wh_json:get_value(<<"value">>, JObj)}
                        ])
      | Acc

@@ -19,6 +19,8 @@
          ,put/1
          ,post/2, post/3
          ,delete/2
+
+         ,flush/0
         ]).
 
 -ifdef(TEST).
@@ -32,8 +34,15 @@
                                  ]).
 -define(CB_LIST, <<"notifications/crossbar_listing">>).
 -define(PREVIEW, <<"preview">>).
+-define(SMTP_LOG, <<"logs">>).
+-define(CB_LIST_SMTP_LOG, <<"notifications/smtp_log">>).
 
 -define(MACROS, <<"macros">>).
+
+-define(MOD_CONFIG_CAT, <<(?CONFIG_CAT)/binary, ".notifications">>).
+-define(NOTIFICATION_TIMEOUT
+        ,whapps_config:get_integer(?MOD_CONFIG_CAT, <<"notification_timeout_ms">>, 5 * ?MILLISECONDS_IN_SECOND)
+       ).
 
 %%%===================================================================
 %%% API
@@ -100,6 +109,8 @@ authorize(_Context, _AuthAccountId, _Nouns) ->
 -spec allowed_methods(path_token(), path_token()) -> http_methods().
 allowed_methods() ->
     [?HTTP_GET, ?HTTP_PUT].
+allowed_methods(?SMTP_LOG) ->
+    [?HTTP_GET];
 allowed_methods(_) ->
     [?HTTP_GET, ?HTTP_POST, ?HTTP_DELETE].
 allowed_methods(_, ?PREVIEW) ->
@@ -132,6 +143,8 @@ resource_exists(_Id, ?PREVIEW) -> 'true'.
                                     cb_context:context().
 -spec content_types_provided(cb_context:context(), path_token(), http_method()) ->
                                     cb_context:context().
+content_types_provided(Context, ?SMTP_LOG) ->
+    Context;
 content_types_provided(Context, Id) ->
     content_types_provided(Context, kz_notification:db_id(Id), cb_context:req_verb(Context)).
 
@@ -183,6 +196,8 @@ content_type_from_attachment(_Name, Attachment, Acc) ->
     end.
 
 -spec content_types_accepted(cb_context:context(), path_token()) -> cb_context:context().
+content_types_accepted(Context, ?SMTP_LOG) ->
+    Context;
 content_types_accepted(Context, _Id) ->
     content_types_accepted_for_upload(Context, cb_context:req_verb(Context)).
 
@@ -212,6 +227,8 @@ content_types_accepted_for_upload(Context, _Verb) ->
 validate(Context) ->
     validate_notifications(Context, cb_context:req_verb(Context)).
 
+validate(Context, ?SMTP_LOG) ->
+    load_smtp_log(Context);
 validate(Context, Id) ->
     validate_notification(Context, kz_notification:db_id(Id), cb_context:req_verb(Context)).
 
@@ -232,7 +249,36 @@ validate_notification(Context, Id, ?HTTP_GET) ->
 validate_notification(Context, Id, ?HTTP_POST) ->
     maybe_update(Context, Id);
 validate_notification(Context, Id, ?HTTP_DELETE) ->
+    validate_delete_notification(Context, Id).
+
+-spec validate_delete_notification(cb_context:context(), path_token()) ->
+                                          cb_context:context().
+-spec validate_delete_notification(cb_context:context(), path_token(), ne_binary(), ne_binary()) ->
+                                          cb_context:context().
+validate_delete_notification(Context, Id) ->
+    {'ok', MasterAccountId} = whapps_util:get_master_account_id(),
+    validate_delete_notification(Context, Id, MasterAccountId, cb_context:account_id(Context)).
+
+validate_delete_notification(Context, Id, MasterAccountId, MasterAccountId) ->
+    disallow_delete(Context, kz_notification:resp_id(Id));
+validate_delete_notification(Context, Id, _MasterAccountId, 'undefined') ->
+    disallow_delete(Context, kz_notification:resp_id(Id));
+validate_delete_notification(Context, Id, _MasterAccuontId, _AccountId) ->
+    lager:debug("trying to remove notification from account ~s", [_AccountId]),
     read(Context, Id, 'account').
+
+-spec disallow_delete(cb_context:context(), path_token()) -> cb_context:context().
+disallow_delete(Context, Id) ->
+    lager:debug("deleting the master template is disallowed"),
+    cb_context:add_validation_error(Id
+                                    ,<<"disallow">>
+                                    ,wh_json:from_list(
+                                       [{<<"message">>, <<"Top-level notification template cannot be deleted">>}
+                                        ,{<<"target">>, Id}
+                                       ]
+                                      )
+                                    ,Context
+                                   ).
 
 %%--------------------------------------------------------------------
 %% @public
@@ -287,6 +333,7 @@ post(Context, Id, ?PREVIEW) ->
     case wh_amqp_worker:call(API
                              ,publish_fun(Id)
                              ,fun wapi_notifications:notify_update_v/1
+                             ,?NOTIFICATION_TIMEOUT
                             )
     of
         {'ok', Resp} ->
@@ -375,6 +422,8 @@ publish_fun(<<"port_cancel">>) ->
     fun wapi_notifications:publish_port_cancel/1;
 publish_fun(<<"ported">>) ->
     fun wapi_notifications:publish_ported/1;
+publish_fun(<<"webhook_disabled">>) ->
+    fun wapi_notifications:publish_webhook_disabled/1;
 publish_fun(_Id) ->
     lager:debug("no wapi_notification:publish_~s/1 defined", [_Id]),
     fun(_Any) -> 'ok' end.
@@ -533,7 +582,7 @@ read(Context, Id, LoadFrom) ->
     Context1 =
         case cb_context:account_db(Context) of
             'undefined' when LoadFrom =:= 'system'; LoadFrom =:= 'system_migrate' ->
-                lager:debug("no account id, loading ~ from system", [Id]),
+                lager:debug("no account id, loading ~s from system", [Id]),
                 read_system(Context, Id);
             _AccountDb ->
                 lager:debug("reading ~s from account first", [Id]),
@@ -634,9 +683,8 @@ maybe_hard_delete(Context, Id) ->
 -spec maybe_note_notification_preference(cb_context:context()) -> 'ok'.
 -spec maybe_note_notification_preference(ne_binary(), wh_json:object()) -> 'ok'.
 maybe_note_notification_preference(Context) ->
-    AccountId = cb_context:account_id(Context),
     AccountDb = cb_context:account_db(Context),
-    case couch_mgr:open_cache_doc(AccountDb, AccountId) of
+    case kz_account:fetch(AccountDb) of
         {'error', _E} -> lager:debug("failed to note preference: ~p", [_E]);
         {'ok', AccountJObj} ->
             maybe_note_notification_preference(AccountDb, AccountJObj)
@@ -857,6 +905,16 @@ cache_available(Context) ->
                          ,[{'origin', [{'db', cb_context:account_db(Context), kz_notification:pvt_type()}]}]
                         ).
 
+-spec flush() -> non_neg_integer().
+flush() ->
+    wh_cache:filter_erase_local(?CROSSBAR_CACHE
+                                ,fun is_cache_key/2
+                               ).
+
+-spec is_cache_key(_, _) -> boolean().
+is_cache_key({?MODULE, 'available'}, _) -> 'true';
+is_cache_key(_K, _V) -> 'false'.
+
 -spec fetch_available() -> {'ok', wh_json:objects()} |
                            {'error', 'not_found'}.
 fetch_available() ->
@@ -903,11 +961,11 @@ merge_available(AccountAvailable, Available) ->
 
 -spec merge_fold(wh_json:object(), wh_json:objects()) -> wh_json:objects().
 merge_fold(Overridden, Acc) ->
-    Id = wh_json:get_value(<<"id">>, Overridden),
+    Id = wh_doc:id(Overridden),
     lager:debug("noting ~s is overridden in account", [Id]),
     [note_account_override(Overridden)
      | [JObj || JObj <- Acc,
-                wh_json:get_value(<<"id">>, JObj) =/= Id
+                wh_doc:id(JObj) =/= Id
        ]
     ].
 
@@ -918,20 +976,47 @@ select_normalize_fun(Context) ->
     Account = cb_context:auth_account_id(Context),
     case wh_util:is_system_admin(Account) of
         'true' -> fun normalize_available_admin/2;
-        'false' -> fun normalize_available_non_admin/2
+        'false' -> fun(JObj, Acc) -> normalize_available_non_admin(JObj, Acc, Context) end
     end.
 
 -spec normalize_available_admin(wh_json:object(), wh_json:objects()) -> wh_json:objects().
--spec normalize_available_non_admin(wh_json:object(), wh_json:objects()) -> wh_json:objects().
 normalize_available_admin(JObj, Acc) ->
-    [wh_json:get_value(<<"value">>, JObj) | Acc].
+    Value = wh_json:get_value(<<"value">>, JObj),
+    case kz_notification:category(Value) of
+        <<"skel">> -> Acc;
+        _Category -> [Value | Acc]
+    end.
 
-normalize_available_non_admin(JObj, Acc) ->
+-spec normalize_available_non_admin(wh_json:object(), wh_json:objects(), cb_context:context()) ->
+                                           wh_json:objects().
+normalize_available_non_admin(JObj, Acc, Context) ->
     Value = wh_json:get_value(<<"value">>, JObj),
     case kz_notification:category(Value) of
         <<"system">> -> Acc;
         <<"skel">> -> Acc;
+        <<"port">> -> normalize_available_port(Value, Acc, Context);
         _Category -> [Value | Acc]
+    end.
+
+-spec normalize_available_port(wh_json:object(), wh_json:objects(), cb_context:context()) ->
+                                      wh_json:objects().
+normalize_available_port(Value, Acc, Context) ->
+    AccountId = cb_context:account_id(Context),
+    AuthAccountId = cb_context:auth_account_id(Context),
+
+    case wh_services:is_reseller(AuthAccountId)
+        andalso cb_port_requests:authority(AccountId)
+    of
+        'false' -> Acc;
+
+        'undefined' -> [Value | Acc];
+        AuthAccountId -> [Value | Acc];
+
+        _OtherAccountId ->
+            lager:debug("another account ~s manages port requests for ~s, not ~s"
+                        ,[_OtherAccountId, AccountId, AuthAccountId]
+                       ),
+            Acc
     end.
 
 %%--------------------------------------------------------------------
@@ -1056,3 +1141,19 @@ leak_attachments_fold(_Attachment, Props, Acc) ->
                       ,wh_json:from_list([{<<"length">>, wh_json:get_integer_value(<<"length">>, Props)}])
                       ,Acc
                      ).
+
+-spec load_smtp_log(cb_context:context()) -> cb_context:context().
+load_smtp_log(Context) ->
+    case cb_modules_util:range_modb_view_options(Context) of
+        {'ok', ViewOptions} ->
+            crossbar_doc:load_view(?CB_LIST_SMTP_LOG
+                                   ,['include_docs' | ViewOptions]
+                                   ,Context
+                                   ,fun normalize_view_results/2
+                                  );
+        Ctx -> Ctx
+    end.
+
+-spec normalize_view_results(wh_json:object(), wh_json:objects()) -> wh_json:objects().
+normalize_view_results(JObj, Acc) ->
+    [wh_json:get_value(<<"doc">>, JObj)|Acc].

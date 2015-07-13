@@ -11,6 +11,7 @@
 %%%   James Aimonetti
 %%%   Karl Anderson
 %%%   Ben Wann
+%%%   KAZOO-3596: Sponsored by GTNetwork LLC, implemented by SIPLABS LLC
 %%%-------------------------------------------------------------------
 -module(cb_cdrs).
 
@@ -22,6 +23,11 @@
          ,to_json/1
          ,to_csv/1
         ]).
+-export([pagination/1]).
+-export([fetch_view_options/1]).
+-export([get_cdr_ids/3]).
+-export([maybe_paginate_and_clean/2]).
+-export([load_chunked_cdrs/3]).
 
 -include("../crossbar.hrl").
 
@@ -61,6 +67,7 @@
           ,{<<"rate_name">>, fun col_rate_name/2}
           ,{<<"bridge_id">>, fun col_bridge_id/2}
           ,{<<"recording_url">>, fun col_recording_url/2}
+          ,{<<"call_priority">>, fun col_call_priority/2}
          ]).
 
 -define(COLUMNS_RESELLER
@@ -69,6 +76,7 @@
          ]).
 
 -type payload() :: {cowboy_req:req(), cb_context:context()}.
+-export_type([payload/0]).
 
 %%%===================================================================
 %%% Internal functions
@@ -102,7 +110,7 @@ to_json({Req1, Context}) ->
 
 -spec pagination(payload()) -> payload().
 pagination({Req, Context}=Payload) ->
-    PageSize = cb_context:fetch(Context, 'page_size'),
+    PageSize = cb_context:fetch(Context, 'page_size', 0),
     'ok' = cowboy_req:chunk(<<", \"page_size\": ", (wh_util:to_binary(PageSize))/binary>>, Req),
     case cb_context:fetch(Context, 'next_start_key') of
         'undefined' -> 'ok';
@@ -290,21 +298,7 @@ load_view(View, ViewOptions, Context) ->
 chunked_dbs(AccountId, ViewOptions) ->
     To = view_option('startkey',ViewOptions),
     From = view_option('endkey',  ViewOptions),
-
-    [MODb || MODb <- ranged_modbs(AccountId, From, To),
-             couch_mgr:db_exists(MODb)
-    ].
-
--spec ranged_modbs(ne_binary(), gregorian_seconds(), gregorian_seconds()) ->
-                          ne_binaries().
-ranged_modbs(AccountId, From, To) ->
-    {{FromYear, FromMonth, _}, _} = calendar:gregorian_seconds_to_datetime(From),
-    {{ToYear, ToMonth, _}, _} = calendar:gregorian_seconds_to_datetime(To),
-
-    Seq = crossbar_util:generate_year_month_sequence({FromYear, FromMonth}
-                                                     ,{ToYear, ToMonth}
-                                                    ),
-    [kazoo_modb:get_modb(AccountId, Year, Month) || {Year, Month} <- Seq].
+    kazoo_modb:get_range(AccountId, From, To).
 
 -spec view_option('endkey' | 'startkey', wh_proplist()) -> pos_integer().
 view_option(Key, ViewOptions) ->
@@ -378,13 +372,12 @@ get_cdr_ids(Db, View, ViewOptions) ->
     case couch_mgr:get_results(Db, View, ViewOptions) of
         {'error', _R} ->
             lager:debug("unable to fetch ~s from ~s: ~p"
-                       ,[View, Db, _R]),
+                       ,[View, Db, _R]
+                       ),
             {'ok', []};
         {'ok', JObjs} ->
             lager:debug("fetched cdr ids from ~s", [Db]),
-            {'ok', [{wh_json:get_value(<<"id">>, JObj)
-                     ,wh_json:get_value(<<"key">>, JObj)
-                    }
+            {'ok', [{wh_doc:id(JObj), wh_json:get_value(<<"key">>, JObj)}
                     || JObj <- JObjs
                    ]}
     end.
@@ -528,6 +521,7 @@ col_rate(JObj, _Timestamp) -> wh_util:to_binary(wht_util:units_to_dollars(wh_jso
 col_rate_name(JObj, _Timestamp) -> wh_json:get_value([<<"custom_channel_vars">>, <<"rate_name">>], JObj, <<>>).
 col_bridge_id(JObj, _Timestamp) -> wh_json:get_value([<<"custom_channel_vars">>, <<"bridge_id">>], JObj, <<>>).
 col_recording_url(JObj, _Timestamp) -> wh_json:get_value([<<"custom_channel_vars">>, <<"recording_url">>], JObj, <<>>).
+col_call_priority(JObj, _Timestamp) -> wh_json:get_value([<<"custom_channel_vars">>, <<"call_priority">>], JObj, <<>>).
 
 col_reseller_cost(JObj, _Timestamp) -> wh_util:to_binary(reseller_cost(JObj)).
 col_reseller_call_type(JObj, _Timestamp) -> wh_json:get_value([<<"custom_channel_vars">>, <<"reseller_billing">>], JObj, <<>>).

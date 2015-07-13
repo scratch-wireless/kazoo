@@ -21,7 +21,7 @@
 
 -record(gateway, {
            server :: api_binary()
-           ,port :: api_binary()
+           ,port :: api_integer()
            ,realm :: api_binary()
            ,username :: api_binary()
            ,password :: api_binary()
@@ -142,8 +142,7 @@ endpoints(Number, JObj) ->
 maybe_get_endpoints(Number, JObj) ->
     case wh_json:get_value(<<"Hunt-Account-ID">>, JObj) of
         'undefined' -> get_global_endpoints(Number, JObj);
-        HuntAccount ->
-            maybe_get_local_endpoints(HuntAccount, Number, JObj)
+        HuntAccount -> maybe_get_local_endpoints(HuntAccount, Number, JObj)
     end.
 
 -spec maybe_get_local_endpoints(ne_binary(), ne_binary(), wh_json:object()) -> wh_json:objects().
@@ -207,9 +206,13 @@ reverse_lookup(JObj) ->
 
 -spec find_port(wh_json:object()) -> api_integer().
 find_port(JObj) ->
-    wh_json:get_first_defined([<<"From-Network-Port">>
+    case wh_json:get_first_defined([<<"From-Network-Port">>
                                     ,<<"Orig-Port">>
-                                   ], JObj).
+                                   ], JObj)
+    of
+        'undefined' -> 'undefined';
+        Port -> wh_util:to_integer(Port)
+    end.
 
 -spec find_account_id(api_binary(), wh_json:object()) -> api_binary().
 find_account_id(Realm, JObj) ->
@@ -229,33 +232,34 @@ find_account_id(Realm) ->
         {'ok', AccountId} -> AccountId
     end.
 
--spec maybe_find_global(api_binary(), api_binary(), api_binary()) ->
+-spec maybe_find_global(api_binary(), api_integer(), api_binary()) ->
                                {'ok', wh_proplist()} |
                                {'error', 'not_found'}.
 maybe_find_global(IP, Port, Realm) ->
     search_resources(IP, Port, Realm, get()).
 
--spec maybe_find_local(api_binary(), api_binary(), api_binary(), api_binary()) ->
+-spec maybe_find_local(api_binary(), api_integer(), api_binary(), api_binary()) ->
                               {'ok', wh_proplist()} |
                               {'error', 'not_found'}.
 maybe_find_local(_, _, _, 'undefined') -> {'error', 'not_found'};
 maybe_find_local(IP, Port, Realm, AccountId) ->
     search_resources(IP, Port, Realm, get(AccountId)).
 
--spec search_resources(api_binary(), api_binary(), api_binary(), resources()) ->
+-spec search_resources(api_binary(), api_integer(), api_binary(), resources()) ->
                               {'ok', wh_proplist()} |
                               {'error', 'not_found'}.
 search_resources(_IP, _Port, _Realm, []) ->
-    lager:debug("failed to find matching resource for ~s:~s(~s)", [_IP, _Port, _Realm]),
+    lager:debug("failed to find matching resource for ~s:~p(~s)", [_IP, _Port, _Realm]),
     {'error', 'not_found'};
 search_resources(IP, Port, Realm, [#resrc{id=Id
-                                    ,gateways=Gateways
-                                    ,global=Global
-                                   }
-                             | Resources
-                            ]) ->
+                                          ,gateways=Gateways
+                                          ,global=Global
+                                         }
+                                   | Resources
+                                  ]) ->
     case search_gateways(IP, Port, Realm, Gateways) of
-        {'error', 'not_found'} -> search_resources(IP, Port, Realm, Resources);
+        {'error', 'not_found'} ->
+            search_resources(IP, Port, Realm, Resources);
         #gateway{realm=GatewayRealm
                  ,username=Username
                  ,password=Password
@@ -272,7 +276,7 @@ search_resources(IP, Port, Realm, [#resrc{id=Id
             {'ok', Props}
     end.
 
--spec search_gateways(api_binary(), api_binary(), api_binary(), gateways()) ->
+-spec search_gateways(api_binary(), api_integer(), api_binary(), gateways()) ->
                              gateway() |
                              {'error', 'not_found'}.
 search_gateways(_, _, _, []) -> {'error', 'not_found'};
@@ -282,15 +286,37 @@ search_gateways(IP, Port, Realm, [Gateway | Gateways]) ->
         #gateway{}=Gateway -> Gateway
     end.
 
--spec search_gateway(api_binary(), api_binary(), api_binary(), gateway()) ->
+-spec search_gateway(api_binary(), api_integer(), api_binary(), gateway()) ->
                             gateway() |
                             {'error', 'not_found'}.
-search_gateway(IP, Port, _, #gateway{server=IP, port=Port, force_port='true'}=Gateway) when IP =/= 'undefined' andalso Port =/= 'undefined' -> Gateway;
-search_gateway(IP, _, _, #gateway{server=IP, force_port='false'}=Gateway) when IP =/= 'undefined' -> Gateway;
-search_gateway(IP, _, _, #gateway{realm=IP, force_port='false'}=Gateway) when IP =/= 'undefined' -> Gateway;
-search_gateway(_, _, Realm, #gateway{realm=Realm, force_port='false'}=Gateway) when Realm =/= 'undefined' -> Gateway;
-search_gateway(_, _, Realm, #gateway{server=Realm, force_port='false'}=Gateway) when Realm =/= 'undefined' -> Gateway;
-search_gateway(_, _, _, _) -> {'error', 'not_found'}.
+search_gateway(IP, Port, _, #gateway{server=IP
+                                     ,port=Port
+                                     ,force_port='true'
+                                    }=Gateway
+              ) when IP =/= 'undefined' andalso Port =/= 'undefined' ->
+    Gateway;
+search_gateway(IP, _, _, #gateway{server=IP
+                                  ,force_port='false'
+                                 }=Gateway
+              ) when IP =/= 'undefined' ->
+    Gateway;
+search_gateway(IP, _, _, #gateway{realm=IP
+                                  ,force_port='false'
+                                 }=Gateway
+              ) when IP =/= 'undefined' ->
+    Gateway;
+search_gateway(_, _, Realm, #gateway{realm=Realm
+                                     ,force_port='false'
+                                    }=Gateway
+              ) when Realm =/= 'undefined' ->
+    Gateway;
+search_gateway(_, _, Realm, #gateway{server=Realm
+                                     ,force_port='false'
+                                    }=Gateway
+              ) when Realm =/= 'undefined' ->
+    Gateway;
+search_gateway(_, _, _, _) ->
+    {'error', 'not_found'}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -664,7 +690,7 @@ fetch_local_resources(AccountId, JObjs) ->
 -spec fetch_local_cache_origin(wh_json:objects(), ne_binary(), wh_cache_props()) -> wh_cache_props().
 fetch_local_cache_origin([], _, Props) -> [{'type', <<"resource">>} | Props];
 fetch_local_cache_origin([JObj|JObjs], AccountDb, Props) ->
-    Id = wh_json:get_value(<<"id">>, JObj),
+    Id = wh_doc:id(JObj),
     fetch_local_cache_origin(JObjs, AccountDb, [{'db', AccountDb, Id}|Props]).
 
 -spec fetch_account_dedicated_proxies(api_binary()) -> wh_proplist().
@@ -704,9 +730,9 @@ create_resource(JObj, Resources) ->
     case wh_json:get_value(<<"classifiers">>, JObj) of
         'undefined' -> [resource_from_jobj(JObj) | Resources];
         ResourceClassifiers ->
-            ConfigClassifiers = wh_json:to_proplist(whapps_config:get(?CONFIG_CAT, <<"classifiers">>)),
+            AccountId = wh_doc:account_id(JObj),
             create_resource(wh_json:to_proplist(ResourceClassifiers)
-                            ,ConfigClassifiers
+                            ,wh_json:to_proplist(wnm_util:available_classifiers(AccountId))
                             ,JObj
                             ,Resources
                            )
@@ -720,9 +746,10 @@ create_resource([{Classifier, ClassifierJobj}|Cs], ConfigClassifiers, JObj, Reso
     of
         'false' -> create_resource(Cs, ConfigClassifiers, JObj, Resources);
         'true' ->
-            Id = wh_json:get_value(<<"_id">>, JObj),
+            Id = wh_doc:id(JObj),
             Name = wh_json:get_value(<<"name">>, JObj),
-            Props = [{<<"rules">>, [wh_json:get_value(<<"regex">>, ConfigClassifier)]}
+            DefaultRegex = wh_json:get_value(<<"regex">>, ConfigClassifier),
+            Props = [{<<"rules">>, [wh_json:get_value(<<"regex">>, ClassifierJobj, DefaultRegex)]}
                      ,{<<"weight_cost">>, wh_json:get_value(<<"weight_cost">>, ClassifierJobj)}
                      ,{<<"_id">>, <<Id/binary, "-", Classifier/binary>>}
                      ,{<<"name">>, <<Name/binary, " - ", Classifier/binary>>}
@@ -744,8 +771,8 @@ create_resource([{Classifier, ClassifierJobj}|Cs], ConfigClassifiers, JObj, Reso
 
 -spec resource_from_jobj(wh_json:object()) -> resource().
 resource_from_jobj(JObj) ->
-    Resource = #resrc{id=wh_json:get_value(<<"_id">>, JObj)
-                      ,rev=wh_json:get_value(<<"_rev">>, JObj)
+    Resource = #resrc{id=wh_doc:id(JObj)
+                      ,rev=wh_doc:revision(JObj)
                       ,name=wh_json:get_value(<<"name">>, JObj)
                       ,flags=wh_json:get_value(<<"flags">>, JObj, [])
                       ,require_flags=wh_json:is_true(<<"require_flags">>, JObj)
@@ -794,9 +821,7 @@ resource_codecs(JObj) ->
 -spec resource_rules(wh_json:object()) -> rules().
 resource_rules(JObj) ->
     lager:info("compiling resource rules for ~s / ~s"
-               ,[wh_json:get_value(<<"pvt_account_db">>, JObj, <<"offnet">>)
-                 ,wh_json:get_value(<<"_id">>, JObj)
-                ]),
+               ,[wh_doc:account_db(JObj, <<"offnet">>), wh_doc:id(JObj)]),
     Rules = wh_json:get_value(<<"rules">>, JObj, []),
     resource_rules(Rules, []).
 
@@ -814,9 +839,7 @@ resource_rules([Rule|Rules], CompiledRules) ->
 -spec resource_cid_rules(wh_json:object()) -> rules().
 resource_cid_rules(JObj) ->
     lager:info("compiling resource rules for ~s / ~s"
-               ,[wh_json:get_value(<<"pvt_account_db">>, JObj, <<"offnet">>)
-                 ,wh_json:get_value(<<"_id">>, JObj)
-                ]),
+               ,[wh_doc:account_db(JObj, <<"offnet">>), wh_doc:id(JObj)]),
     Rules = wh_json:get_value(<<"cid_rules">>, JObj, []),
     resource_rules(Rules, []).
 
@@ -878,7 +901,7 @@ gateway_from_jobj(JObj, #resrc{is_emergency=IsEmergency
     EndpointType = wh_json:get_ne_value(<<"endpoint_type">>, JObj, <<"sip">>),
     #gateway{endpoint_type=EndpointType
              ,server=wh_json:get_value(<<"server">>, JObj)
-             ,port=wh_json:get_binary_value(<<"port">>, JObj)
+             ,port=wh_json:get_integer_value(<<"port">>, JObj)
              ,realm=wh_json:get_value(<<"realm">>, JObj)
              ,username=wh_json:get_value(<<"username">>, JObj)
              ,password=wh_json:get_value(<<"password">>, JObj)
@@ -974,20 +997,23 @@ endpoint_options(_, _) -> wh_json:new().
 gateway_dialstring(#gateway{route='undefined'
                             ,prefix=Prefix
                             ,suffix=Suffix
-                            ,server=Server
+                           ,server=Server
                             ,port=Port
                            }, Number) ->
-    DialStringPort = case wh_util:is_not_empty(Port) andalso Port =/= <<"5060">> of
-        'true' -> <<":", Port/binary>>;
-        'false' -> <<>>
-    end,
+    DialStringPort =
+        case wh_util:is_not_empty(Port)
+            andalso Port =/= 5060
+        of
+            'true' -> <<":", (wh_util:to_binary(Port))/binary>>;
+            'false' -> <<>>
+        end,
     Route = list_to_binary(["sip:"
                             ,wh_util:to_binary(Prefix)
                             ,Number
                             ,wh_util:to_binary(Suffix)
                             ,"@"
                             ,wh_util:to_binary(Server)
-                            ,DialStringPort
+                            ,wh_util:to_binary(DialStringPort)
                            ]),
     lager:debug("created gateway route ~s", [Route]),
     Route;

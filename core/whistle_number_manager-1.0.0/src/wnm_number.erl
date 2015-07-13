@@ -193,10 +193,9 @@ fetch_number(#number{number_db=Db
 -spec maybe_correct_used_by(wnm_number(), wh_json:object()) -> wnm_number().
 maybe_correct_used_by(#number{assigned_to=Account}=N) ->
     case load_phone_number_doc(Account) of
-        {'ok', JObj} ->
-            maybe_correct_used_by(N, JObj);
+        {'ok', JObj} -> maybe_correct_used_by(N, JObj);
         {'error', _R} ->
-            lager:warning("failed to get phone number doc for correction: ~p", [_R]),
+            lager:warning("failed to get phone number doc for used_by correction: ~p", [_R]),
             N
     end.
 
@@ -279,26 +278,17 @@ simple_save(#number{}=Number) ->
                ],
     lists:foldl(fun(F, J) -> F(J) end, Number, Routines).
 
--spec maybe_update_service_plans(wnm_number() | {_, wnm_number()}) ->
-                                        wnm_number() |
-                                        {_, wnm_number()}.
+-spec maybe_update_service_plans(wnm_number()) -> wnm_number().
 maybe_update_service_plans(#number{state = ?NUMBER_STATE_DISCOVERY}=N) -> N;
-maybe_update_service_plans(#number{}=N) -> update_service_plans(N);
-maybe_update_service_plans(E) -> E.
+maybe_update_service_plans(#number{}=N) -> update_service_plans(N).
 
--spec maybe_save_phone_number_docs(wnm_number() | {_, wnm_number()}) ->
-                                          wnm_number() |
-                                          {_, wnm_number()}.
+-spec maybe_save_phone_number_docs(wnm_number()) -> wnm_number().
 maybe_save_phone_number_docs(#number{state = ?NUMBER_STATE_DISCOVERY}=N) -> N;
-maybe_save_phone_number_docs(#number{}=N) -> save_phone_number_docs(N);
-maybe_save_phone_number_docs(E) -> E.
+maybe_save_phone_number_docs(#number{}=N) -> save_phone_number_docs(N).
 
--spec maybe_save_number_doc(wnm_number() | {_, wnm_number()}) ->
-                                   wnm_number() |
-                                   {_, wnm_number()}.
+-spec maybe_save_number_doc(wnm_number()) -> wnm_number().
 maybe_save_number_doc(#number{dry_run='true'}=N) -> N;
-maybe_save_number_doc(#number{}=N) -> save_number_doc(N);
-maybe_save_number_doc(E) -> E.
+maybe_save_number_doc(#number{}=N) -> save_number_doc(N).
 
 -spec maybe_get_updated_phone_number_docs(wnm_number()) -> wnm_number().
 maybe_get_updated_phone_number_docs(#number{state = ?NUMBER_STATE_DISCOVERY}=N) -> N;
@@ -609,15 +599,23 @@ in_service(Number) ->
 %% @end
 %%--------------------------------------------------------------------
 -spec released_authorize_change(wnm_number()) -> wnm_number().
+released_authorize_change(#number{auth_by='system'
+                                  ,number_doc=JObj
+                                 }=N) ->
+    N#number{
+      features=sets:new()
+      ,number_doc=wh_json:private_fields(JObj)
+     };
 released_authorize_change(#number{assigned_to=AssignedTo
                                   ,auth_by=AuthBy
                                   ,number_doc=JObj
                                  }=N) ->
     case wh_util:is_in_account_hierarchy(AuthBy, AssignedTo, 'true') of
         'false' -> error_unauthorized(N);
-        'true' -> N#number{features=sets:new()
-                           ,number_doc=wh_json:private_fields(JObj)
-                          }
+        'true' ->
+            N#number{features=sets:new()
+                     ,number_doc=wh_json:private_fields(JObj)
+                    }
     end.
 
 -spec released_move_states(wnm_number(), ne_binary()) -> wnm_number().
@@ -680,6 +678,13 @@ released(#number{state = ?NUMBER_STATE_RESERVED}=Number) ->
                ],
     lists:foldl(fun(F, J) -> F(J) end, Number, Routines);
 released(#number{state = ?NUMBER_STATE_IN_SERVICE}=Number) ->
+    NewState = whapps_config:get_binary(?WNM_CONFIG_CAT, <<"released_state">>, ?NUMBER_STATE_AVAILABLE),
+    Routines = [fun released_authorize_change/1
+                ,fun(N) -> released_move_states(N, NewState) end
+                ,fun released_maybe_disconnect/1
+               ],
+    lists:foldl(fun(F, J) -> F(J) end, Number, Routines);
+released(#number{state = ?NUMBER_STATE_PORT_IN}=Number) ->
     NewState = whapps_config:get_binary(?WNM_CONFIG_CAT, <<"released_state">>, ?NUMBER_STATE_AVAILABLE),
     Routines = [fun released_authorize_change/1
                 ,fun(N) -> released_move_states(N, NewState) end
@@ -765,31 +770,32 @@ json_to_record(JObj, IsNew, #number{number=Num
                                     ,number_db=Db
                                    }=Number) ->
     Number#number{
-      number=wh_json:get_value(<<"_id">>, JObj, Num)
-      ,number_db=wh_json:get_value(<<"pvt_db_name">>, JObj, Db)
-      ,state=wh_json:get_ne_value(?PVT_NUMBER_STATE, JObj)
-      ,current_state=wh_json:get_ne_value(?PVT_NUMBER_STATE, JObj)
-      ,reserve_history=ordsets:from_list(wh_json:get_ne_value(<<"pvt_reserve_history">>, JObj, []))
-      ,assigned_to=wh_json:get_ne_value(<<"pvt_assigned_to">>, JObj)
-      ,prev_assigned_to=wh_json:get_ne_value(<<"pvt_previously_assigned_to">>, JObj)
-      ,module_name=wnm_util:get_carrier_module(JObj)
-      ,module_data=wh_json:get_ne_value(<<"pvt_module_data">>, JObj)
-      ,features=sets:from_list(wh_json:get_ne_value(<<"pvt_features">>, JObj, []))
-      ,current_features=sets:from_list(wh_json:get_ne_value(<<"pvt_features">>, JObj, []))
-      ,number_doc=JObj
-      ,current_number_doc=case IsNew of 'true' -> wh_json:new(); 'false' -> JObj end
-      ,used_by=wh_json:get_value(<<"used_by">>, JObj, <<>>)
-      ,is_new=IsNew
+      number = wh_doc:id(JObj, Num)
+      ,number_db = wh_json:get_value(<<"pvt_db_name">>, JObj, Db)
+      ,state = wh_json:get_ne_value(?PVT_NUMBER_STATE, JObj)
+      ,current_state = wh_json:get_ne_value(?PVT_NUMBER_STATE, JObj)
+      ,reserve_history = ordsets:from_list(wh_json:get_ne_value(<<"pvt_reserve_history">>, JObj, []))
+      ,assigned_to = wh_json:get_ne_value(<<"pvt_assigned_to">>, JObj)
+      ,prev_assigned_to = wh_json:get_ne_value(<<"pvt_previously_assigned_to">>, JObj)
+      ,module_name = wnm_util:get_carrier_module(JObj)
+      ,module_data = wh_json:get_ne_value(<<"pvt_module_data">>, JObj)
+      ,features = sets:from_list(wh_json:get_ne_value(<<"pvt_features">>, JObj, []))
+      ,current_features  =sets:from_list(wh_json:get_ne_value(<<"pvt_features">>, JObj, []))
+      ,number_doc = JObj
+      ,current_number_doc = case IsNew of 'true' -> wh_json:new(); 'false' -> JObj end
+      ,used_by = wh_json:get_value(<<"used_by">>, JObj, <<>>)
+      ,is_new = IsNew
      }.
 
 -spec number_from_port_doc(wnm_number(), wh_json:object()) -> wnm_number().
 number_from_port_doc(#number{number=N}=Number, JObj) ->
+    AccountId = wh_doc:account_id(JObj),
     Number#number{
-      number_db=wnm_util:number_to_db_name(N)
+      number_db = wnm_util:number_to_db_name(N)
       ,state = ?NUMBER_STATE_PORT_IN
       ,current_state = ?NUMBER_STATE_PORT_IN
-      ,assigned_to=wh_json:get_ne_value(<<"pvt_account_id">>, JObj)
-      ,auth_by=wh_json:get_ne_value(<<"pvt_account_id">>, JObj)
+      ,assigned_to = AccountId
+      ,auth_by = AccountId
      }.
 
 %%--------------------------------------------------------------------
@@ -812,7 +818,7 @@ record_to_json(#number{number_doc=JObj}=N) ->
                ,{<<"pvt_features">>, [wh_util:to_binary(F) || F <- sets:to_list(N#number.features)]}
                ,{<<"pvt_db_name">>, N#number.number_db}
                ,{<<"pvt_modified">>, Now}
-               ,{<<"pvt_created">>, wh_json:get_value(<<"pvt_created">>, JObj, Now)}
+               ,{<<"pvt_created">>, wh_doc:created(JObj, Now)}
                ,{<<"used_by">>, N#number.used_by}
                ,{<<"pvt_type">>, <<"number">>}
               ],
@@ -1185,8 +1191,8 @@ create_number_summary(_Account, #number{state=State
                        ,{<<"features">>, NFeatures}
                        ,{<<"assigned_to">>, AssignedTo}
                        ,{<<"used_by">>, UsedBy}
-                       ,{<<"created">>, wh_json:get_value(<<"pvt_created">>, Doc, 0)}
-                       ,{<<"updated">>, wh_json:get_value(<<"pvt_modified">>, Doc, 0)}
+                       ,{<<"created">>, wh_doc:created(Doc, 0)}
+                       ,{<<"updated">>, wh_doc:modified(Doc, 0)}
                       ]).
 
 %%--------------------------------------------------------------------

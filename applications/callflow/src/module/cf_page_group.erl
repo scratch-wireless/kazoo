@@ -20,7 +20,7 @@
 %% stop when successfull.
 %% @end
 %%--------------------------------------------------------------------
--spec handle(wh_json:object(), whapps_call:call()) -> any().
+-spec handle(wh_json:object(), whapps_call:call()) -> _.
 handle(Data, Call) ->
     case get_endpoints(wh_json:get_value(<<"endpoints">>, Data, []), Call) of
         [] ->
@@ -45,10 +45,11 @@ attempt_page(Endpoints, Data, Call) ->
 -spec get_endpoints(wh_json:objects(), whapps_call:call()) -> wh_json:objects().
 get_endpoints(Members, Call) ->
     S = self(),
-    Builders = [spawn(fun() ->
-                              put('callid', whapps_call:call_id(Call)),
-                              S ! {self(), catch cf_endpoint:build(EndpointId, Member, Call)}
-                      end)
+    Builders = [wh_util:spawn(
+                  fun() ->
+                          wh_util:put_callid(whapps_call:call_id(Call)),
+                          S ! {self(), catch cf_endpoint:build(EndpointId, Member, Call)}
+                  end)
                 || {EndpointId, Member} <- resolve_endpoint_ids(Members, Call)
                ],
     lists:foldl(fun(Pid, Acc) ->
@@ -77,7 +78,7 @@ resolve_endpoint_ids(Members, Call) ->
 resolve_endpoint_ids([], EndpointIds, _) ->
     EndpointIds;
 resolve_endpoint_ids([Member|Members], EndpointIds, Call) ->
-    Id = wh_json:get_value(<<"id">>, Member),
+    Id = wh_doc:id(Member),
     Type = wh_json:get_value(<<"endpoint_type">>, Member, <<"device">>),
     case wh_util:is_empty(Id)
         orelse lists:keymember(Id, 2, EndpointIds)

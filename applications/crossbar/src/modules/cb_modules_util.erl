@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%%% @copyright (C) 2011-2014, 2600Hz INC
+%%% @copyright (C) 2011-2015, 2600Hz INC
 %%% @doc
 %%% Functions shared between crossbar modules
 %%% @end
@@ -20,13 +20,15 @@
 
          ,bucket_name/1
          ,token_cost/1, token_cost/2, token_cost/3
-         ,reconcile_services/1
          ,bind/2
 
          ,range_view_options/1, range_view_options/2
 
          ,range_modb_view_options/1, range_modb_view_options/2, range_modb_view_options/3
-         ,range_modbs/3
+
+         ,take_sync_field/1
+
+         ,remove_plaintext_password/1
         ]).
 
 -include("../crossbar.hrl").
@@ -38,10 +40,10 @@
        ).
 
 -spec range_view_options(cb_context:context()) ->
-                                {pos_integer(), pos_integer()} |
+                                {gregorian_seconds(), gregorian_seconds()} |
                                 cb_context:context().
 -spec range_view_options(cb_context:context(), pos_integer()) ->
-                                {pos_integer(), pos_integer()} |
+                                {gregorian_seconds(), gregorian_seconds()} |
                                 cb_context:context().
 range_view_options(Context) ->
     range_view_options(Context, ?MAX_RANGE).
@@ -53,28 +55,28 @@ range_view_options(Context, MaxRange) ->
     case CreatedTo - CreatedFrom of
         N when N < 0 ->
             cb_context:add_validation_error(
-                <<"created_from">>
-                ,<<"date_range">>
-                ,wh_json:from_list([
-                    {<<"message">>, <<"created_from is prior to created_to">>}
-                    ,{<<"cause">>, CreatedFrom}
+              <<"created_from">>
+              ,<<"date_range">>
+              ,wh_json:from_list(
+                 [{<<"message">>, <<"created_from is prior to created_to">>}
+                  ,{<<"cause">>, CreatedFrom}
                  ])
-                ,Context
-            );
+              ,Context
+             );
         N when N > MaxRange ->
             Message = <<"created_to is more than "
                         ,(wh_util:to_binary(MaxRange))/binary
                         ," seconds from created_from"
                       >>,
             cb_context:add_validation_error(
-                <<"created_from">>
-                ,<<"date_range">>
-                ,wh_json:from_list([
-                    {<<"message">>, Message}
-                    ,{<<"cause">>, CreatedTo}
+              <<"created_from">>
+              ,<<"date_range">>
+              ,wh_json:from_list(
+                 [{<<"message">>, Message}
+                  ,{<<"cause">>, CreatedTo}
                  ])
-                ,Context
-            );
+              ,Context
+             );
         _N -> {CreatedFrom, CreatedTo}
     end.
 
@@ -100,34 +102,19 @@ range_modb_view_options(Context, PrefixKeys, 'undefined') ->
 range_modb_view_options(Context, PrefixKeys, SuffixKeys) ->
     case cb_modules_util:range_view_options(Context) of
         {CreatedFrom, CreatedTo} ->
+            AccountId = cb_context:account_id(Context),
             case PrefixKeys =:= [] andalso SuffixKeys =:= [] of
                 'true' -> {'ok', [{'startkey', CreatedFrom}
                                   ,{'endkey', CreatedTo}
-                                  | range_modbs(Context, CreatedFrom, CreatedTo)
+                                  ,{'databases', kazoo_modb:get_range(AccountId, CreatedFrom, CreatedTo)}
                                  ]};
                 'false' -> {'ok', [{'startkey', [Key || Key <- PrefixKeys ++ [CreatedFrom] ++ SuffixKeys] }
                                    ,{'endkey', [Key || Key <- PrefixKeys  ++ [CreatedTo]   ++ SuffixKeys] }
-                                   | range_modbs(Context, CreatedFrom, CreatedTo)
+                                   ,{'databases', kazoo_modb:get_range(AccountId, CreatedFrom, CreatedTo)}
                                   ]}
             end;
         Context1 -> Context1
     end.
-
--spec range_modbs(cb_context:context(), pos_integer(), pos_integer()) ->
-                         [{'databases', ne_binaries()}].
-range_modbs(Context, From, To) ->
-    AccountId = cb_context:account_id(Context),
-    {{FromYear, FromMonth, _}, _} = calendar:gregorian_seconds_to_datetime(From),
-    {{ToYear, ToMonth, _}, _} = calendar:gregorian_seconds_to_datetime(To),
-
-    [{'databases', [wh_util:format_account_mod_id(AccountId, Year, Month)
-                    || {Year, Month} <- crossbar_util:generate_year_month_sequence({FromYear, FromMonth}
-                                                                                   ,{ToYear, ToMonth}
-                                                                                   ,[]
-                                                                                  )
-                   ]
-     }
-    ].
 
 -spec created_to(cb_context:context(), pos_integer()) -> pos_integer().
 created_to(Context, TStamp) ->
@@ -145,44 +132,28 @@ created_from(Context, CreatedTo, MaxRange) ->
     lager:debug("building created_from from req value"),
     wh_util:to_integer(cb_context:req_value(Context, <<"created_from">>, CreatedTo - MaxRange)).
 
--spec bind(atom(), wh_proplist()) -> 'ok'.
+-type binding() :: {ne_binary(), atom()}.
+-type bindings() :: [binding(),...].
+-spec bind(atom(), bindings()) -> 'ok'.
 bind(Module, Bindings) ->
-    [crossbar_bindings:bind(Binding, Module, Function)
-     || {Binding, Function} <- Bindings
-    ],
+    _ = [crossbar_bindings:bind(Binding, Module, Function)
+         || {Binding, Function} <- Bindings
+        ],
     'ok'.
-
-%%--------------------------------------------------------------------
-%% @public
-%% @doc
-%% Bill for devices
-%% @end
-%%--------------------------------------------------------------------
--spec reconcile_services(cb_context:context()) -> cb_context:context().
-reconcile_services(Context) ->
-    case cb_context:resp_status(Context) =:= 'success'
-        andalso cb_context:req_verb(Context) =/= <<"GET">>
-    of
-        'false' -> Context;
-        'true' ->
-            lager:debug("maybe reconciling services for account ~s"
-                       ,[cb_context:account_id(Context)]),
-            _ = wh_services:save_as_dirty(cb_context:account_id(Context))
-    end.
 
 -spec pass_hashes(ne_binary(), ne_binary()) -> {ne_binary(), ne_binary()}.
 pass_hashes(Username, Password) ->
     Creds = list_to_binary([Username, ":", Password]),
-    SHA1 = wh_util:to_hex_binary(crypto:hash(sha, Creds)),
-    MD5 = wh_util:to_hex_binary(crypto:hash(md5, Creds)),
+    SHA1 = wh_util:to_hex_binary(crypto:hash('sha', Creds)),
+    MD5 = wh_util:to_hex_binary(crypto:hash('md5', Creds)),
     {MD5, SHA1}.
 
 -spec update_mwi(api_binary(), ne_binary()) -> pid().
 update_mwi(OwnerId, AccountDb) ->
-    spawn(fun() ->
-                  timer:sleep(1000),
-                  cf_util:unsolicited_owner_mwi_update(AccountDb, OwnerId)
-          end).
+    wh_util:spawn(fun() ->
+                          timer:sleep(?MILLISECONDS_IN_SECOND),
+                          cf_util:unsolicited_owner_mwi_update(AccountDb, OwnerId)
+                  end).
 
 -spec get_devices_owned_by(ne_binary(), ne_binary()) -> wh_json:objects().
 get_devices_owned_by(OwnerID, DB) ->
@@ -228,8 +199,9 @@ create_call_from_context(Context) ->
           ]),
     whapps_call:exec(Routines, whapps_call:new()).
 
--spec request_specific_extraction_funs(cb_context:context()) -> functions().
--spec request_specific_extraction_funs_from_nouns(cb_context:context(), req_nouns()) -> functions().
+-spec request_specific_extraction_funs(cb_context:context()) -> whapps_call:exec_funs().
+-spec request_specific_extraction_funs_from_nouns(cb_context:context(), req_nouns()) ->
+                                                         whapps_call:exec_funs().
 request_specific_extraction_funs(Context) ->
     request_specific_extraction_funs_from_nouns(Context, cb_context:req_nouns(Context)).
 
@@ -336,7 +308,7 @@ originate_quickcall(Endpoints, Call, Context) ->
               ],
     wapi_resource:publish_originate_req(props:filter_undefined(Request)),
     JObj = wh_json:normalize(wh_json:from_list(wh_api:remove_defaults(Request))),
-    crossbar_util:response_202(JObj, cb_context:set_resp_data(Context, Request)).
+    crossbar_util:response_202(<<"quickcall initiated">>, JObj, cb_context:set_resp_data(Context, Request)).
 
 -spec maybe_auto_answer(wh_json:objects(), boolean()) -> wh_json:objects().
 maybe_auto_answer([Endpoint], AutoAnswer) ->
@@ -367,7 +339,7 @@ get_timeout(Context) ->
 
 -spec get_ignore_early_media(cb_context:context()) -> boolean().
 get_ignore_early_media(Context) ->
-    wh_util:is_true(cb_context:req_value(Context, <<"ignore-early-media">>)).
+    wh_util:is_true(cb_context:req_value(Context, <<"ignore-early-media">>, 'true')).
 
 -spec get_media(cb_context:context()) -> ne_binary().
 get_media(Context) ->
@@ -397,16 +369,10 @@ get_caller_id_number(Context) ->
 %% @end
 %%--------------------------------------------------------------------
 -spec is_superduper_admin(api_binary() | cb_context:context()) -> boolean().
--spec is_superduper_admin(ne_binary(), ne_binary()) -> boolean().
 is_superduper_admin('undefined') -> 'false';
 is_superduper_admin(<<_/binary>> = AccountId) ->
-    is_superduper_admin(AccountId, wh_util:format_account_id(AccountId, 'encoded'));
-is_superduper_admin(Context) ->
-    is_superduper_admin(cb_context:auth_account_id(Context)).
-
-is_superduper_admin(AccountId, AccountDb) ->
-    lager:debug("checking for superduper admin: ~s (~s)", [AccountId, AccountDb]),
-    case couch_mgr:open_cache_doc(AccountDb, AccountId) of
+    lager:debug("checking for superduper admin: ~s", [AccountId]),
+    case kz_account:fetch(AccountId) of
         {'ok', JObj} ->
             case kz_account:is_superduper_admin(JObj) of
                 'true' ->
@@ -419,7 +385,9 @@ is_superduper_admin(AccountId, AccountDb) ->
         {'error', _E} ->
             lager:debug("not authorizing, error during lookup: ~p", [_E]),
             'false'
-    end.
+    end;
+is_superduper_admin(Context) ->
+    is_superduper_admin(cb_context:auth_account_id(Context)).
 
 %%--------------------------------------------------------------------
 %% @private
@@ -470,7 +438,9 @@ content_type_to_extension(<<"image/jpeg">>) -> <<"jpg">>;
 content_type_to_extension(<<"image/png">>) -> <<"png">>;
 content_type_to_extension(<<"image/gif">>) -> <<"gif">>;
 content_type_to_extension(<<"text/html">>) -> <<"html">>;
-content_type_to_extension(<<"text/plain">>) -> <<"txt">>.
+content_type_to_extension(<<"text/plain">>) -> <<"txt">>;
+content_type_to_extension(<<"image/icon">>) -> <<"ico">>;
+content_type_to_extension(<<"image/x-icon">>) -> <<"ico">>.
 
 -spec parse_media_type(ne_binary()) ->
                               {'error', 'badarg'} |
@@ -551,3 +521,19 @@ get_token_cost(JObj, Default, Keys) ->
         'undefined' -> Default;
         V -> wh_util:to_integer(V)
     end.
+
+%% @public
+-spec take_sync_field(cb_context:context()) -> cb_context:context().
+take_sync_field(Context) ->
+    Doc = cb_context:doc(Context),
+    ShouldSync = wh_json:is_true(<<"sync">>, Doc, 'false'),
+    CleansedDoc = wh_json:delete_key(<<"sync">>, Doc),
+    cb_context:setters(Context, [{fun cb_context:store/3, 'sync', ShouldSync}
+                                 ,{fun cb_context:set_doc/2, CleansedDoc}
+                                ]).
+
+%% @public
+-spec remove_plaintext_password(cb_context:context()) -> cb_context:context().
+remove_plaintext_password(Context) ->
+    Doc = wh_json:delete_key(<<"confirm_password">>, cb_context:doc(Context)),
+    cb_context:set_doc(Context, Doc).

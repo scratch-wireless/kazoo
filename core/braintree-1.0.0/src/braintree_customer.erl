@@ -84,7 +84,7 @@ default_payment_token(#bt_customer{}=Customer) ->
 default_payment_token(CustomerId) ->
     default_payment_token(find(CustomerId)).
 
--spec default_payment_card(ne_binary() | customer()) -> braintree_card:card().
+-spec default_payment_card(ne_binary() | customer()) -> bt_card().
 default_payment_card(#bt_customer{}=Customer) ->
     braintree_card:default_payment_card(get_cards(Customer));
 default_payment_card(CustomerId) ->
@@ -106,7 +106,7 @@ get_id(#bt_customer{id=CustomerId}) ->
 %% Get credit cards
 %% @end
 %%--------------------------------------------------------------------
--spec get_cards(customer()) -> braintree_card:cards().
+-spec get_cards(customer()) -> bt_cards().
 get_cards(#bt_customer{credit_cards=Cards}) ->
     Cards.
 
@@ -191,33 +191,53 @@ create(CustomerId) ->
 %% @end
 %%--------------------------------------------------------------------
 -spec update(customer()) -> customer().
-update(#bt_customer{id=CustomerId}=Customer) ->
-    Url = url(CustomerId),
-    Request = record_to_xml(Customer, 'true'),
-    Xml = braintree_request:put(Url, Request),
-    UpdateRecord = xml_to_record(Xml),
+update(#bt_customer{}=Customer) ->
+    %% Note: coming from cb_braintree, Customer only has (unsynced) card data
+    case [Card || Card <- get_cards(Customer),
+                  braintree_card:make_default(Card) =:= 'true'
+         ]
+    of
+        [] -> do_update(Customer);
+        [Card] ->
+            Cards = [ braintree_card:make_default(Card, 'false')
+                      | lists:delete(Card, get_cards(Customer))
+                    ],
+            %% Add new credit card, not setting it as default yet.
+            UpdatedRecord = do_update(Customer#bt_customer{credit_cards = Cards}),
 
-    LatestCC = braintree_card:delete_unused_cards(get_cards(UpdateRecord)),
-    NewPT = braintree_card:default_payment_token(LatestCC),
+            NewPaymentToken = braintree_card:payment_token(Card),
+            %% NewCard = Card with updated fields
+            {[NewCard], OldCards} =
+                lists:partition(fun(CC) -> braintree_card:payment_token(CC) =:= NewPaymentToken end
+                                ,get_cards(UpdatedRecord)
+                               ),
 
-    NewSubs = [maybe_update_subscription(NewPT, Sub)
-               || Sub <- get_subscriptions(UpdateRecord)
-              ],
+            NewSubscriptions =
+                [braintree_subscription:update(
+                   braintree_subscription:update_payment_token(Sub, NewPaymentToken))
+                 || Sub <- get_subscriptions(UpdatedRecord)
+                        , not braintree_subscription:is_cancelled(Sub)
+                ],
 
-    UpdateRecord#bt_customer{credit_cards = LatestCC
-                             ,subscriptions = NewSubs
-                            }.
+            %% Make card as default /after/ updating subscriptions: this way subscriptions
+            %%  are not attached to a deleted card and thus do not get cancelled before
+            %%  we can update their payment token.
+            NewCards = [ braintree_card:update(braintree_card:make_default(NewCard, 'true')) ],
 
--spec maybe_update_subscription(api_binary(), braintree_subscription:subscription()) ->
-                                       braintree_subscription:subscription().
-maybe_update_subscription(NewPT, Sub) ->
-    case braintree_subscription:get_payment_token(Sub) of
-        NewPT when NewPT =/= 'undefined' -> Sub;
-        _OldPT ->
-            %% Card updated -> Subscription has been cancelled
-            NewSub = braintree_subscription:new(Sub, NewPT),
-            braintree_subscription:update(NewSub)
+            %% Delete previous cards /after/ changing subscriptions' payment token.
+            lists:foreach(fun braintree_card:delete/1, OldCards),
+
+            UpdatedRecord#bt_customer{credit_cards = NewCards
+                                      ,subscriptions = NewSubscriptions
+                                     }
     end.
+
+-spec do_update(bt_customer()) -> bt_customer().
+do_update(#bt_customer{id=CustomerId}=Customer) ->
+    Url = url(CustomerId),
+    Record = record_to_xml(Customer, 'true'),
+    Xml = braintree_request:put(Url, Record),
+    xml_to_record(Xml).
 
 %%--------------------------------------------------------------------
 %% @public
@@ -310,7 +330,7 @@ record_to_xml(Customer, ToString) ->
 -spec json_to_record(api_object()) -> customer().
 json_to_record('undefined') -> #bt_customer{};
 json_to_record(JObj) ->
-    #bt_customer{id = wh_json:get_binary_value(<<"id">>, JObj)
+    #bt_customer{id = wh_doc:id(JObj)
                  ,first_name = wh_json:get_binary_value(<<"first_name">>, JObj)
                  ,last_name = wh_json:get_binary_value(<<"last_name">>, JObj)
                  ,company = wh_json:get_binary_value(<<"company">>, JObj)

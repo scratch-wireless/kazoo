@@ -14,20 +14,22 @@
 
 -define(CONFLICT_ACTION, 'tone').
 
--define(TONE, wh_json:from_list([
-                    {<<"caller_id">>,[]}
-                    ,{<<"number">>,[<<"5555555551">>]}
-                ])).
--define(ECHO, wh_json:from_list([
-                    {<<"caller_id">>,[]}
-                    ,{<<"number">>,[<<"5555555552">>]}
-                ])).
+-define(TONE, wh_json:from_list(
+                [{<<"caller_id">>,[]}
+                ,{<<"number">>,[<<"5555555551">>]}
+                ])
+       ).
+-define(ECHO, wh_json:from_list(
+                [{<<"caller_id">>,[]}
+                ,{<<"number">>,[<<"5555555552">>]}
+                ])
+       ).
 
 
 handle_req(JObj, Props) ->
     'true' = wapi_route:req_v(JObj),
     CallId = wh_json:get_value(<<"Call-ID">>, JObj),
-    put('callid', CallId),
+    wh_util:put_callid(CallId),
     Call = whapps_call:from_route_req(JObj),
 
     %% do magic to determine if we should respond...
@@ -54,7 +56,7 @@ send_route_response(ControllerQ, JObj) ->
     whapps_util:amqp_pool_send(Resp, Publisher),
     lager:info("milliwatt knows how to route the call! sent park response").
 
--spec tone_or_echo(whapps_call:call()) -> atom().
+-spec tone_or_echo(whapps_call:call()) -> 'echo' | 'tone' | 'undefined'.
 tone_or_echo(Call) ->
     CallJObj = whapps_call:to_json(Call),
     From = wh_json:get_binary_value(<<"Caller-ID-Number">>, CallJObj, <<>>),
@@ -106,9 +108,3 @@ rule_exist(JObj, To, From) ->
         {'false', 'false'} -> 'false';
         _ -> 'true'
     end.
-
-
-
-
-
-

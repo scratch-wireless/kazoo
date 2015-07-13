@@ -305,6 +305,28 @@ extract_multipart(Context, Req, QS) ->
                           {cb_context:context(), cowboy_req:req()} |
                           halt_return().
 extract_file(Context, ContentType, Req0) ->
+    try extract_file_part_body(Context, ContentType, Req0) of
+        Return -> Return
+    catch
+        _E:_R ->
+            extract_file_body(Context, ContentType, Req0)
+    end.
+
+-spec extract_file_part_body(cb_context:context(), ne_binary(), cowboy_req:req()) ->
+                          {cb_context:context(), cowboy_req:req()} |
+                          halt_return().
+extract_file_part_body(Context, ContentType, Req0) ->
+    case cowboy_req:part_body(Req0, [{'length', ?MAX_UPLOAD_SIZE}]) of
+        {'more', _, Req1} ->
+            handle_max_filesize_exceeded(Context, Req1);
+        {'ok', FileContents, Req1} ->
+            handle_file_contents(Context, ContentType, Req1, FileContents)
+    end.
+
+-spec extract_file_body(cb_context:context(), ne_binary(), cowboy_req:req()) ->
+                          {cb_context:context(), cowboy_req:req()} |
+                          halt_return().
+extract_file_body(Context, ContentType, Req0) ->
     case cowboy_req:body(Req0, [{'length', ?MAX_UPLOAD_SIZE}]) of
         {'more', _, Req1} ->
             handle_max_filesize_exceeded(Context, Req1);
@@ -322,7 +344,7 @@ handle_max_filesize_exceeded(Context, Req1) ->
                  ,cb_context:add_validation_error(<<"file">>
                                                   ,<<"maxLength">>
                                                   ,wh_json:from_list(
-                                                     [{<<"message">>, <<"String must not be more than ", MaxLen/binary, " characters">>}
+                                                     [{<<"message">>, <<"Files must not be more than ", MaxLen/binary, " bytes">>}
                                                       ,{<<"target">>, Maximum}
                                                      ])
                                                   ,Context
@@ -589,7 +611,10 @@ allow_methods(Responses, ReqVerb, HttpVerb) ->
     case crossbar_bindings:succeeded(Responses) of
         [] -> [];
         Succeeded ->
-            AllowedSet = lists:foldr(fun allow_methods_fold/2, sets:new(), Succeeded),
+            AllowedSet = lists:foldr(fun allow_methods_fold/2
+                                     ,sets:new()
+                                     ,Succeeded
+                                    ),
             maybe_add_post_method(ReqVerb, HttpVerb, sets:to_list(AllowedSet))
     end.
 
@@ -995,7 +1020,7 @@ finish_request(_Req, Context) ->
     [{Mod, _}|_] = cb_context:req_nouns(Context),
     Verb = cb_context:req_verb(Context),
     Event = create_event_name(Context, [<<"finish_request">>, Verb, Mod]),
-    _ = spawn('crossbar_bindings', 'map', [Event, Context]),
+    _ = wh_util:spawn('crossbar_bindings', 'map', [Event, Context]),
     'ok'.
 
 %%--------------------------------------------------------------------

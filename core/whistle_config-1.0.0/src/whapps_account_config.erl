@@ -73,7 +73,7 @@ get(Account, Config) ->
     AccountDb = wh_util:format_account_id(AccountId, 'encoded'),
     DocId = config_doc_id(Config),
     case couch_mgr:open_cache_doc(AccountDb, DocId, [{'cache_failures', ['not_found']}]) of
-        {'error', _} -> wh_json:set_value(<<"_id">>, DocId, wh_json:new());
+        {'error', _} -> wh_doc:set_id(wh_json:new(), DocId);
         {'ok', JObj} -> JObj
     end.
 
@@ -172,5 +172,5 @@ account_db_from_call(Obj, 'false') ->
 account_db_from_jobj(JObj, 'true') ->
     wh_json:get_first_defined([<<"Account-DB">>, <<"account_db">>], JObj);
 account_db_from_jobj(_Obj, 'false') ->
-    lager:dxebug("unable to find account db from ~p", [_Obj]),
+    lager:debug("unable to find account db from ~p", [_Obj]),
     throw({'error', 'unknown_object'}).

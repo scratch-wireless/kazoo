@@ -82,7 +82,7 @@ start_link(Call) ->
 init([Call]) ->
     process_flag('trap_exit', 'true'),
     CallId = whapps_call:call_id(Call),
-    put('callid', CallId),
+    wh_util:put_callid(CallId),
     self() ! 'initialize',
     {'ok', #state{call=Call}}.
 
@@ -202,7 +202,7 @@ dial(AccountId, OutboundCID, AuthDocId, Call) ->
     CallId = whapps_call:call_id(Call),
     put_auth_doc_id(AuthDocId, CallId),
     {'num_to_dial', ToDID} = cccp_util:get_number(Call),
-    _ = spawn('cccp_util', 'store_last_dialed', [ToDID, AuthDocId]),
+    _ = wh_util:spawn('cccp_util', 'store_last_dialed', [ToDID, AuthDocId]),
     Req = cccp_util:build_bridge_request(CallId, ToDID, <<>>, whapps_call:control_queue(Call), AccountId, OutboundCID),
     wapi_offnet_resource:publish_req(Req).
 
