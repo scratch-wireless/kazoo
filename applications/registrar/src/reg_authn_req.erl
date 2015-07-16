@@ -309,6 +309,9 @@ account_ccvs_from_ip_auth(Doc) ->
     AccountID = wh_json:get_value([<<"value">>, <<"account_id">>], Doc),
     OwnerID = wh_json:get_value([<<"value">>, <<"owner_id">>], Doc),
     AuthType = wh_json:get_value([<<"value">>, <<"authorizing_type">>], Doc, <<"anonymous">>),
+    UserName = wh_json:get_value([<<"value">>, <<"username">>], Doc),
+    AccountRealm = wh_util:get_account_realm(AccountID),
+    Realm = wh_json:get_value([<<"value">>, <<"realm">>], Doc, AccountRealm),
 
     props:filter_undefined(
       [{<<"Account-ID">>, AccountID}
@@ -316,6 +319,9 @@ account_ccvs_from_ip_auth(Doc) ->
        ,{<<"Authorizing-ID">>, wh_json:get_value(<<"id">>, Doc)}
        ,{<<"Inception">>, <<"on-net">>}
        ,{<<"Authorizing-Type">>, AuthType}
+       ,{<<"Username">>, UserName}
+       ,{<<"Realm">>, Realm}
+       ,{<<"Account-Realm">>, AccountRealm}
       ]).
 
 %%-----------------------------------------------------------------------------
