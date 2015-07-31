@@ -77,15 +77,16 @@ set_disable_threshold(Account, Count) ->
 -spec failure_status() -> 'ok'.
 -spec failure_status(ne_binary()) -> 'ok'.
 failure_status() ->
-    Failed = webhooks_listener:find_failures(),
+    Failed = webhooks_disabler:find_failures(),
     Sorted = lists:keysort(1, Failed),
     print_failure_header(),
     _ = [print_failure_count(AccountId, HookId, Count) || {{AccountId, HookId}, Count} <- Sorted],
     print_failure_footer().
 
 failure_status(Account) ->
-    AccountId = wh_util:format_account_id(Account),
-    Failed = webhooks_listener:find_failures(),
+    AccountId = wh_util:format_account_id(Account, 'raw'),
+    Failed = webhooks_disabler:find_failures(),
+
     Sorted = lists:keysort(1, Failed),
     print_failure_header(),
     _ = [print_failure_count(AID, HookId, Count) || {{AID, HookId}, Count} <- Sorted, AccountId =:= AID],

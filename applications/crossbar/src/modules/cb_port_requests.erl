@@ -45,9 +45,13 @@
                                ]).
 
 -define(AGG_VIEW_DESCENDANTS, <<"accounts/listing_by_descendants">>).
+-define(ACCOUNTS_BY_SIMPLE_ID, <<"accounts/listing_by_simple_id">>).
 -define(PORT_REQ_NUMBERS, <<"port_requests/port_in_numbers">>).
 -define(ALL_PORT_REQ_NUMBERS, <<"port_requests/all_port_in_numbers">>).
 -define(LISTING_BY_STATE, <<"port_requests/listing_by_state">>).
+-define(DESCENDANT_LISTING_BY_STATE, <<"port_requests/listing_by_descendant_state">>).
+
+-define(DESCENDANTS, <<"descendants">>).
 
 -define(UNFINISHED_PORT_REQUEST_LIFETIME
         ,whapps_config:get_integer(?MY_CONFIG_CAT, <<"unfinished_port_request_lifetime_s">>, ?SECONDS_IN_DAY * 30)
@@ -289,23 +293,27 @@ content_types_accepted(Context, _Id, ?PORT_ATTACHMENT, _AttachmentId) ->
 -spec validate(cb_context:context(), path_token(), path_token(), path_token()) ->
                       cb_context:context().
 validate(Context) ->
-    validate_port_requests(Context, cb_context:req_verb(Context)).
+    validate_port_request(Context, cb_context:req_verb(Context)).
 
+validate(Context, ?PORT_UNCONFIRMED = Type) ->
+    validate_load_summary(Context, Type);
 validate(Context, ?PORT_SUBMITTED = Type) ->
-    validate_load_requests(Context, Type);
+    validate_load_summary(Context, Type);
 validate(Context, ?PORT_PENDING = Type) ->
-    validate_load_requests(Context, Type);
+    validate_load_summary(Context, Type);
 validate(Context, ?PORT_SCHEDULED = Type) ->
-    validate_load_requests(Context, Type);
+    validate_load_summary(Context, Type);
 validate(Context, ?PORT_COMPLETE = Type) ->
-    validate_load_requests(Context, Type);
+    validate_load_summary(Context, Type);
 validate(Context, ?PORT_REJECT = Type) ->
-    validate_load_requests(Context, Type);
+    validate_load_summary(Context, Type);
 validate(Context, ?PORT_CANCELED = Type) ->
-    validate_load_requests(Context, Type);
+    validate_load_summary(Context, Type);
 validate(Context, Id) ->
     validate_port_request(Context, Id, cb_context:req_verb(Context)).
 
+validate(Context, Id, ?PORT_UNCONFIRMED) ->
+    validate_port_request(Context, Id, ?PORT_UNCONFIRMED, cb_context:req_verb(Context));
 validate(Context, Id, ?PORT_SUBMITTED) ->
     validate_port_request(Context, Id, ?PORT_SUBMITTED, cb_context:req_verb(Context));
 validate(Context, Id, ?PORT_PENDING) ->
@@ -326,60 +334,32 @@ validate(Context, Id, ?PATH_TOKEN_LOA) ->
 validate(Context, Id, ?PORT_ATTACHMENT, AttachmentId) ->
     validate_attachment(Context, Id, AttachmentId, cb_context:req_verb(Context)).
 
--spec validate_port_requests(cb_context:context(), http_method()) ->
+-spec validate_load_summary(cb_context:context(), ne_binary()) ->
                                     cb_context:context().
-validate_port_requests(Context, ?HTTP_GET) ->
-    validate_get_port_requests(
-      Context
-      ,props:get_value(<<"accounts">>, cb_context:req_nouns(Context))
-      ,cb_context:req_value(Context, <<"by_number">>)
-     );
-validate_port_requests(Context, ?HTTP_PUT) ->
-    create(Context).
-
--spec validate_load_requests(cb_context:context(), ne_binary()) ->
-                                    cb_context:context().
-validate_load_requests(Context, ?PORT_COMPLETE = Type) ->
-    case cb_modules_util:range_view_options(Context) of
-        {From, To} ->
-            lager:debug("loading requests for ~s from ~p to ~p", [Type, From, To]),
-            load_requests(Context
-                          ,[{'startkey', [cb_context:account_id(Context), Type, To]}
-                            ,{'endkey', [cb_context:account_id(Context), Type, From]}
-                           ]
-                         );
+validate_load_summary(Context, ?PORT_COMPLETE = Type) ->
+    case cb_modules_util:range_view_options(Context, ?MAX_RANGE, <<"modified">>) of
+        {From, To} -> load_summary_by_range(Context, Type, From, To);
         Context1 -> Context1
     end;
-validate_load_requests(Context, <<_/binary>> = Type) ->
-    lager:debug("loading requests for ~s", [Type]),
-    load_requests(cb_context:set_should_paginate(Context, 'false')
+validate_load_summary(Context, ?PORT_CANCELED = Type) ->
+    case cb_modules_util:range_view_options(Context, ?MAX_RANGE, <<"modified">>) of
+        {From, To} -> load_summary_by_range(Context, Type, From, To);
+        Context1 -> Context1
+    end;
+validate_load_summary(Context, <<_/binary>> = Type) ->
+    lager:debug("loading summary for ~s", [Type]),
+    load_summary(cb_context:set_should_paginate(Context, 'false')
                   ,[{'startkey', [cb_context:account_id(Context), Type, wh_json:new()]}
                     ,{'endkey', [cb_context:account_id(Context), Type]}
                    ]
                  ).
 
--spec load_requests(cb_context:context(), crossbar_doc:view_options()) ->
-                           cb_context:context().
-load_requests(Context, ViewOptions) ->
-    crossbar_doc:load_view(?LISTING_BY_STATE
-                           ,['include_docs'
-                             ,'descending'
-                             | ViewOptions
-                            ]
-                           ,cb_context:set_account_db(Context, ?KZ_PORT_REQUESTS_DB)
-                           ,fun normalize_view_results/2
-                          ).
-
--spec validate_get_port_requests(cb_context:context(), path_tokens(), api_binary()) ->
-                                        cb_context:context().
-validate_get_port_requests(Context, [_AccountId], 'undefined') ->
+-spec validate_port_request(cb_context:context(), http_method()) ->
+                                    cb_context:context().
+validate_port_request(Context, ?HTTP_GET) ->
     summary(Context);
-validate_get_port_requests(Context, [_AccountId], ByNumber) ->
-    summary_by_number(Context, ByNumber);
-validate_get_port_requests(Context, [_AccountId, ?PORT_DESCENDANTS], 'undefined') ->
-    read_descendants(Context);
-validate_get_port_requests(Context, [_AccountId, ?PORT_DESCENDANTS], ByNumber) ->
-    read_descendants_by_number(Context, ByNumber).
+validate_port_request(Context, ?HTTP_PUT) ->
+    create(Context).
 
 -spec validate_port_request(cb_context:context(), ne_binary(), http_method()) ->
                                    cb_context:context().
@@ -425,7 +405,7 @@ validate_attachment(Context, Id, AttachmentId, ?HTTP_DELETE) ->
 -spec is_deletable(cb_context:context(), ne_binary()) -> cb_context:context().
 is_deletable(Context) ->
     is_deletable(Context, wh_port_request:current_state(cb_context:doc(Context))).
-is_deletable(Context, ?PORT_WAITING) -> Context;
+is_deletable(Context, ?PORT_UNCONFIRMED) -> Context;
 is_deletable(Context, ?PORT_REJECT) -> Context;
 is_deletable(Context, ?PORT_CANCELED) -> Context;
 is_deletable(Context, _PortState) ->
@@ -454,7 +434,23 @@ get(Context, Id, ?PATH_TOKEN_LOA) ->
 -spec put(cb_context:context()) -> cb_context:context().
 -spec put(cb_context:context(), path_token(), path_token()) -> cb_context:context().
 put(Context) ->
-    crossbar_doc:save(cb_context:set_account_db(Context, ?KZ_PORT_REQUESTS_DB)).
+    crossbar_doc:save(
+      update_port_request_for_save(Context)
+     ).
+
+-spec update_port_request_for_save(cb_context:context()) -> cb_context:context().
+update_port_request_for_save(Context) ->
+    cb_context:setters(Context
+                       ,[{fun cb_context:set_account_db/2, ?KZ_PORT_REQUESTS_DB}
+                         ,{fun cb_context:set_doc/2, add_pvt_fields(Context, cb_context:doc(Context))}
+                        ]
+                      ).
+
+-spec add_pvt_fields(cb_context:context(), wh_json:object()) ->
+                            wh_json:object().
+add_pvt_fields(Context, PortRequest) ->
+    Tree = kz_account:tree(cb_context:account_doc(Context)),
+    wh_json:set_value(<<"pvt_tree">>, Tree, PortRequest).
 
 put(Context, Id, ?PORT_ATTACHMENT) ->
     [{Filename, FileJObj}] = cb_context:req_files(Context),
@@ -596,10 +592,13 @@ post(Context, Id, ?PORT_ATTACHMENT, AttachmentId) ->
 
 -spec do_post(cb_context:context(), path_token()) -> cb_context:context().
 do_post(Context, Id) ->
-    Context1 = crossbar_doc:save(cb_context:set_account_db(Context, ?KZ_PORT_REQUESTS_DB)),
+    Context1 = crossbar_doc:save(
+                 update_port_request_for_save(Context)
+                ),
+
     case cb_context:resp_status(Context1) of
         'success' ->
-            _ = maybe_send_port_comment_notification(Context, Id),
+            _ = maybe_send_port_comment_notification(Context1, Id),
             cb_context:set_resp_data(Context1, wh_port_request:public_fields(cb_context:doc(Context1)));
         _Status ->
             Context1
@@ -649,74 +648,6 @@ read(Context, Id) ->
         _ -> Context1
     end.
 
--spec read_descendants(cb_context:context()) -> cb_context:context().
--spec read_descendants(cb_context:context(), ne_binaries()) -> cb_context:context().
-read_descendants(Context) ->
-    Context1 = crossbar_doc:load_view(?AGG_VIEW_DESCENDANTS
-                                      ,[{<<"startkey">>, [cb_context:account_id(Context)]}
-                                        ,{<<"endkey">>, [cb_context:account_id(Context), wh_json:new()]}
-                                       ]
-                                      ,cb_context:set_account_db(Context, ?WH_ACCOUNTS_DB)
-                                     ),
-    case cb_context:resp_status(Context1) of
-        'success' -> read_descendants(Context1, cb_context:doc(Context1));
-        _ -> Context1
-    end.
-
-read_descendants(Context, SubAccounts) ->
-    AllPortRequests =
-        lists:foldl(
-          fun(Account, Acc) ->
-                  read_descendants_fold(Account, Acc, Context)
-          end
-          ,[]
-          ,SubAccounts
-         ),
-    crossbar_doc:handle_json_success(AllPortRequests, Context).
-
--spec read_descendants_fold(wh_json:object(), wh_json:objects(), cb_context:context()) ->
-                                   wh_json:objects().
-read_descendants_fold(Account, Acc, Context) ->
-    AccountId = wh_doc:id(Account),
-    case maybe_read_descendant(Context, AccountId) of
-        'undefined' -> Acc;
-        PortRequests ->
-            [wh_json:from_list(
-               [{<<"account_id">>, AccountId}
-                ,{<<"account_name">>, wh_json:get_value([<<"value">>, <<"name">>], Account)}
-                ,{<<"port_requests">>, PortRequests}
-               ]
-              )
-             |Acc
-            ]
-    end.
-
--spec maybe_read_descendant(cb_context:context(), ne_binary()) -> api_object().
--spec maybe_read_descendant(cb_context:context(), ne_binary(), boolean()) -> api_object().
-maybe_read_descendant(Context, AccountId) ->
-    maybe_read_descendant(Context, AccountId, wh_services:is_reseller(AccountId)).
-
-maybe_read_descendant(Context, AccountId, 'true') ->
-    case authority(AccountId) of
-        'undefined' -> read_descendant(Context, AccountId);
-        AccountId ->
-            lager:debug("~s is managed by itself", [AccountId]),
-            'undefined';
-        _OtherAccountId ->
-            lager:warning("~s is managed by unknown: ~s", [AccountId, _OtherAccountId]),
-            read_descendant(Context, AccountId)
-    end;
-maybe_read_descendant(Context, AccountId, 'false') ->
-    ResellerId = wh_services:find_reseller_id(AccountId),
-    AuthAccountId = cb_context:auth_account_id(Context),
-    case authority(ResellerId) of
-        'undefined' -> read_descendant(Context, AccountId);
-        AuthAccountId -> read_descendant(Context, AccountId);
-        _OtherAccountId ->
-            lager:debug("~s is managed by reseller: ~s", [AccountId, _OtherAccountId]),
-            'undefined'
-    end.
-
 -spec authority(ne_binary()) -> api_binary().
 authority(AccountId) ->
   case kz_whitelabel:fetch(AccountId) of
@@ -724,14 +655,6 @@ authority(AccountId) ->
       {'ok', JObj} ->
           kz_whitelabel:port_authority(JObj)
   end.
-
--spec read_descendant(cb_context:context(), ne_binary()) -> api_object().
-read_descendant(Context, Id) ->
-    Context1 = summary(cb_context:set_account_id(Context, Id)),
-    case cb_context:resp_status(Context1) of
-        'success' -> cb_context:doc(Context1);
-        _Status -> 'undefined'
-    end.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -754,22 +677,155 @@ update(Context, Id) ->
 %%--------------------------------------------------------------------
 -spec summary(cb_context:context()) -> cb_context:context().
 summary(Context) ->
-    ViewOptions = [{'startkey', [cb_context:account_id(Context)]}
-                   ,{'endkey', [cb_context:account_id(Context), wh_json:new()]}
-                   ,'include_docs'
-                  ],
+    case cb_context:req_value(Context, <<"by_number">>) of
+        'undefined' -> load_summary_by_range(Context);
+        Number -> load_summary_by_number(Context, Number)
+    end.
 
-    crossbar_doc:load_view(<<"port_requests/crossbar_listing">>
-                           ,ViewOptions
-                           ,cb_context:set_account_db(Context, ?KZ_PORT_REQUESTS_DB)
-                           ,fun normalize_view_results/2
-                          ).
+-spec load_summary_by_range(cb_context:context()) -> cb_context:context().
+-spec load_summary_by_range(cb_context:context(), gregorian_seconds(), gregorian_seconds()) -> cb_context:context().
+-spec load_summary_by_range(cb_context:context(), ne_binary(), gregorian_seconds(), gregorian_seconds()) -> cb_context:context().
+load_summary_by_range(Context) ->
+    case cb_modules_util:range_view_options(Context, ?MAX_RANGE, <<"modified">>) of
+        {From, To} -> load_summary_by_range(Context, From, To);
+        Context1 -> Context1
+    end.
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% @end
-%%--------------------------------------------------------------------
+load_summary_by_range(Context, From, To) ->
+    lager:debug("loading summary for all port requests from ~p to ~p", [From, To]),
+    normalize_summary_results(
+      lists:foldl(fun(?PORT_SUBMITTED=Type, C) -> load_summary_fold(C, Type);
+                     (?PORT_PENDING=Type, C) -> load_summary_fold(C, Type);
+                     (?PORT_SCHEDULED=Type, C) -> load_summary_fold(C, Type);
+                     (?PORT_REJECT=Type, C) -> load_summary_fold(C, Type);
+                     (Type, C) ->
+                          load_summary_by_range_fold(C, Type, From, To)
+                  end,
+                  cb_context:setters(
+                    Context,
+                    [{fun cb_context:set_resp_data/2, []}
+                    ,{fun cb_context:set_resp_status/2, 'success'}
+                    ]
+                   ),
+                  ?PORT_STATES
+                 )
+     ).
+
+load_summary_by_range(Context, Type, From, To) ->
+    load_summary_by_range(Context, Type, From, To, 'true').
+
+load_summary_by_range(Context, Type, From, To, Normalize) ->
+    lager:debug("loading summary for ~s from ~p to ~p", [Type, From, To]),
+    load_summary(Context
+                ,[{'startkey', [cb_context:account_id(Context), Type, To]}
+                 ,{'endkey', [cb_context:account_id(Context), Type, From]}
+                 ,{'normalize', Normalize}
+                 ]
+                ).
+
+-spec load_summary_fold(cb_context:context(), ne_binary()) -> cb_context:context().
+load_summary_fold(Context, Type) ->
+    Summary = cb_context:resp_data(Context),
+    Props =
+        [{'startkey', [cb_context:account_id(Context), Type, wh_json:new()]}
+        ,{'endkey', [cb_context:account_id(Context), Type]}
+        ,{'normalize', 'false'}
+        ],
+    case cb_context:resp_data(
+           load_summary(cb_context:set_should_paginate(Context, 'false'), Props)
+          )
+    of
+        TypeSummary when is_list(TypeSummary) ->
+            cb_context:set_resp_data(Context, Summary ++ TypeSummary);
+        _Else -> Context
+    end.
+
+
+-spec load_summary_by_range_fold(cb_context:context(), ne_binary(), gregorian_seconds(), gregorian_seconds()) -> cb_context:context().
+load_summary_by_range_fold(Context, Type, From, To) ->
+    Summary = cb_context:resp_data(Context),
+    case cb_context:resp_data(
+           load_summary_by_range(Context, Type, From, To, 'false')
+          )
+    of
+        TypeSummary when is_list(TypeSummary) ->
+            cb_context:set_resp_data(Context, Summary ++ TypeSummary);
+        _Else -> Context
+    end.
+
+-spec load_summary_by_number(cb_context:context(), ne_binary()) -> cb_context:context().
+load_summary_by_number(Context, Number) ->
+    case should_summarize_descendant_requests(Context) of
+        'true' -> summary_descendants_by_number(Context, Number);
+        'false' -> summary_by_number(Context, Number)
+    end.
+
+-spec load_summary(cb_context:context(), crossbar_doc:view_options()) ->
+                           cb_context:context().
+load_summary(Context, ViewOptions) ->
+    View = case should_summarize_descendant_requests(Context) of
+               'true' -> ?DESCENDANT_LISTING_BY_STATE;
+               'false' -> ?LISTING_BY_STATE
+           end,
+    maybe_normalize_summary_results(
+      crossbar_doc:load_view(View
+                            ,['include_docs'
+                             ,'descending'
+                              | ViewOptions
+                             ]
+                            ,cb_context:set_account_db(Context, ?KZ_PORT_REQUESTS_DB)
+                            ,fun normalize_view_results/2
+                            )
+      ,props:get_value('normalize', ViewOptions, 'true')
+     ).
+
+-spec maybe_normalize_summary_results(cb_context:context(), boolean()) -> cb_context:context().
+maybe_normalize_summary_results(Context, 'false') -> Context;
+maybe_normalize_summary_results(Context, 'true') ->
+    case cb_context:resp_status(Context) of
+        'success' -> normalize_summary_results(Context);
+        _Else -> Context
+    end.
+
+-spec normalize_summary_results(cb_context:context()) -> cb_context:context().
+normalize_summary_results(Context) ->
+    Dict = lists:foldl(
+             fun(JObj, D) ->
+                     AccountId = wh_json:get_value(<<"account_id">>, JObj),
+                     dict:append_list(AccountId, [JObj], D)
+             end, dict:new(), cb_context:resp_data(Context)),
+    Names = get_account_names(dict:fetch_keys(Dict)),
+    cb_context:set_resp_data(
+      Context,
+      [wh_json:from_list(
+         [{<<"account_id">>, AccountId}
+         ,{<<"account_name">>, props:get_value(AccountId, Names, <<"unknown">>)}
+         ,{<<"port_requests">>, JObjs}
+         ]
+        )
+       || {AccountId, JObjs} <- dict:to_list(Dict)
+      ]
+     ).
+
+-spec get_account_names(ne_binaries()) -> wh_proplist().
+get_account_names(Keys) ->
+    case couch_mgr:get_results(?WH_ACCOUNTS_DB, ?ACCOUNTS_BY_SIMPLE_ID, Keys) of
+        {'ok', JObjs} ->
+            [{wh_json:get_value(<<"id">>, JObj)
+              ,wh_json:get_value([<<"value">>, <<"name">>], JObj)
+             }
+             || JObj <- JObjs
+            ];
+        {'error', _} -> []
+    end.
+
+-spec should_summarize_descendant_requests(cb_context:context()) -> boolean().
+should_summarize_descendant_requests(Context) ->
+    case props:get_value(<<"accounts">>, cb_context:req_nouns(Context)) of
+        [_AccountId, ?DESCENDANTS] -> 'true';
+        _Params -> 'false'
+    end.
+
 -spec summary_by_number(cb_context:context(), ne_binary()) ->
                                cb_context:context().
 summary_by_number(Context, Number) ->
@@ -783,14 +839,9 @@ summary_by_number(Context, Number) ->
       ,fun normalize_view_results/2
      ).
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% @end
-%%--------------------------------------------------------------------
--spec read_descendants_by_number(cb_context:context(), ne_binary()) ->
+-spec summary_descendants_by_number(cb_context:context(), ne_binary()) ->
                                         cb_context:context().
-read_descendants_by_number(Context, Number) ->
+summary_descendants_by_number(Context, Number) ->
     ViewOptions = [{'keys', build_keys(Context, Number)}
                    ,'include_docs'
                   ],
@@ -853,7 +904,24 @@ build_descendant_key(JObj, Acc, E164) ->
 -spec normalize_view_results(wh_json:object(), wh_json:objects()) ->
                                     wh_json:objects().
 normalize_view_results(Res, Acc) ->
-    [wh_port_request:public_fields(wh_json:get_value(<<"doc">>, Res)) | Acc].
+    [leak_pvt_fields(
+       Res
+       ,wh_port_request:public_fields(wh_json:get_value(<<"doc">>, Res))
+      )
+     | Acc
+    ].
+
+-spec leak_pvt_fields(wh_json:object(), wh_json:object()) -> wh_json:object().
+leak_pvt_fields(Res, JObj) ->
+    Fields = [{[<<"doc">>, <<"pvt_account_id">>], <<"account_id">>}],
+    lists:foldl(
+      fun({Field, Key}, J) ->
+              case wh_json:get_ne_value(Field, Res) of
+                  'undefined' -> J;
+                  Value -> wh_json:set_value(Key, Value, J)
+              end
+      end, JObj, Fields
+     ).
 
 %%--------------------------------------------------------------------
 %% @private
@@ -900,17 +968,17 @@ on_successful_validation(Context, Id, 'true') ->
 on_successful_validation(Context, _Id, 'false') ->
     PortState = wh_json:get_value(?PORT_PVT_STATE, cb_context:doc(Context)),
     lager:debug(
-        "port state ~s is not valid for updating a port request"
-        ,[PortState]
-    ),
+      "port state ~s is not valid for updating a port request"
+      ,[PortState]
+     ),
     cb_context:add_validation_error(
-        PortState
-        ,<<"type">>
-        ,wh_json:from_list([
-            {<<"message">>, <<"Updating port requests not allowed in current port state">>}
-            ,{<<"cause">>, PortState}
+      PortState
+      ,<<"type">>
+      ,wh_json:from_list(
+         [{<<"message">>, <<"Updating port requests not allowed in current port state">>}
+          ,{<<"cause">>, PortState}
          ])
-        ,Context
+      ,Context
      ).
 
 %%--------------------------------------------------------------------
@@ -924,7 +992,7 @@ can_update_port_request(Context) ->
     lager:debug("port request: ~p", [cb_context:doc(Context)]),
     can_update_port_request(Context, wh_port_request:current_state(cb_context:doc(Context))).
 
-can_update_port_request(_Context, ?PORT_WAITING) ->
+can_update_port_request(_Context, ?PORT_UNCONFIRMED) ->
     'true';
 can_update_port_request(_Context, ?PORT_REJECT) ->
     'true';
@@ -939,13 +1007,19 @@ can_update_port_request(Context, _) ->
 -spec successful_validation(cb_context:context(), api_binary()) -> cb_context:context().
 successful_validation(Context, 'undefined') ->
     JObj = cb_context:doc(Context),
-    cb_context:set_doc(Context, wh_json:set_values([{<<"pvt_type">>, <<"port_request">>}
-                                                    ,{?PORT_PVT_STATE, ?PORT_WAITING}
-                                                   ]
-                                                   ,wh_port_request:normalize_numbers(JObj)
-                                                  ));
+    cb_context:set_doc(Context
+                       ,wh_json:set_values([{<<"pvt_type">>, <<"port_request">>}
+                                            ,{?PORT_PVT_STATE, ?PORT_UNCONFIRMED}
+                                           ]
+                                           ,wh_port_request:normalize_numbers(JObj)
+                                          )
+                      );
 successful_validation(Context, _Id) ->
-    cb_context:set_doc(Context, wh_port_request:normalize_numbers(cb_context:doc(Context))).
+    cb_context:set_doc(Context
+                       ,wh_port_request:normalize_numbers(
+                          cb_context:doc(Context)
+                         )
+                      ).
 
 %%--------------------------------------------------------------------
 %% @private
@@ -981,22 +1055,22 @@ check_number_portability(PortId, Number, Context, E164, PortReq) ->
     of
         {'true', 'true'} ->
             lager:debug(
-                "number ~s(~s) is on this existing port request for this account(~s)"
-                ,[E164, Number, cb_context:account_id(Context)]
-            ),
+              "number ~s(~s) is on this existing port request for this account(~s)"
+              ,[E164, Number, cb_context:account_id(Context)]
+             ),
             cb_context:set_resp_status(Context, 'success');
         {'true', 'false'} ->
             lager:debug(
-                "number ~s(~s) is on a different port request in this account(~s): ~s"
-                ,[E164, Number, cb_context:account_id(Context), wh_doc:id(PortReq)]
-            ),
+              "number ~s(~s) is on a different port request in this account(~s): ~s"
+              ,[E164, Number, cb_context:account_id(Context), wh_doc:id(PortReq)]
+             ),
             Message = <<"Number is on a port request already: ", (wh_doc:id(PortReq))/binary>>,
             number_validation_error(Context, Number, Message);
         {'false', _} ->
             lager:debug(
-                "number ~s(~s) is on existing port request for other account(~s)"
-                ,[E164, Number, wh_json:get_value(<<"value">>, PortReq)]
-            ),
+              "number ~s(~s) is on existing port request for other account(~s)"
+              ,[E164, Number, wh_json:get_value(<<"value">>, PortReq)]
+             ),
             number_validation_error(Context, Number, <<"Number is being ported for a different account">>)
     end.
 
@@ -1083,10 +1157,10 @@ maybe_move_state(Context, Id, PortState) ->
             cb_context:add_validation_error(
               <<"port_state">>
               ,<<"enum">>
-                  ,wh_json:from_list(
-                     [{<<"message">>, <<"Cannot move to new state from current state">>}
-                      ,{<<"cause">>, PortState}
-                     ])
+              ,wh_json:from_list(
+                 [{<<"message">>, <<"Cannot move to new state from current state">>}
+                  ,{<<"cause">>, PortState}
+                 ])
               ,Context
              )
     end.

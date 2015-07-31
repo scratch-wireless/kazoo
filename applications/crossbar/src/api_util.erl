@@ -115,8 +115,8 @@ add_cors_headers(Req0, Context) ->
 get_cors_headers(Allow) ->
     [{<<"access-control-allow-origin">>, <<"*">>}
      ,{<<"access-control-allow-methods">>, wh_util:join_binary(Allow, <<", ">>)}
-     ,{<<"access-control-allow-headers">>, <<"Content-Type, Depth, User-Agent, X-Http-Method-Override, X-File-Size, X-Requested-With, If-Modified-Since, X-File-Name, Cache-control, X-Auth-Token, If-Match">>}
-     ,{<<"access-control-expose-headers">>, <<"Content-Type, X-Auth-Token, X-Request-ID, Location, Etag, ETag">>}
+     ,{<<"access-control-allow-headers">>, <<"Content-Type, Depth, User-Agent, X-Http-Method-Override, X-File-Size, X-Requested-With, If-Modified-Since, X-File-Name, Cache-control, X-Auth-Token, X-Kazoo-Cluster-ID, If-Match">>}
+     ,{<<"access-control-expose-headers">>, <<"Content-Type, X-Auth-Token, X-Request-ID, X-Kazoo-Cluster-ID, Location, Etag, ETag">>}
      ,{<<"access-control-max-age">>, wh_util:to_binary(?SECONDS_IN_DAY)}
     ].
 
@@ -581,12 +581,18 @@ is_cb_module(Context, Elem) ->
     end.
 
 -spec is_cb_module_version(cb_context:context(), ne_binary()) -> boolean().
-is_cb_module_version(#cb_context{api_version=ApiVersion}, Elem) ->
-    try (wh_util:to_atom(<<"cb_", Elem/binary, "_", ApiVersion/binary>>)):module_info('imports') of
-        _ -> 'true'
-    catch
-        'error':'badarg' -> 'false'; %% atom didn't exist already
-        _E:_R -> 'false'
+is_cb_module_version(Context, Elem) ->
+    case cb_context:is_context(Context) of
+        'false' -> 'false';
+        'true'  ->
+            ApiVersion = cb_context:api_version(Context),
+            ModuleName = <<"cb_", Elem/binary, "_", ApiVersion/binary>>,
+            try (wh_util:to_atom(ModuleName)):module_info('imports') of
+                _ -> 'true'
+            catch
+                'error':'badarg' -> 'false'; %% atom didn't exist already
+                _E:_R -> 'false'
+            end
     end.
 
 %%--------------------------------------------------------------------
@@ -1124,7 +1130,7 @@ do_create_resp_envelope(Context) ->
 %%--------------------------------------------------------------------
 %% @private
 %% @doc
-%% Iterate through #cb_context.resp_headers, setting the headers specified
+%% Iterate through cb_context:resp_headers/1, setting the headers specified
 %% @end
 %%--------------------------------------------------------------------
 -spec set_resp_headers(cowboy_req:req(), cb_context:context() | wh_proplist()) ->
