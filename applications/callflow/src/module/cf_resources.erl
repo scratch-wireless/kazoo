@@ -91,6 +91,7 @@ build_offnet_request(Data, Call) ->
                             ,{<<"From-URI-Realm">>, get_from_uri_realm(Data, Call)}
                             ,{<<"Bypass-E164">>, get_bypass_e164(Data)}
                             ,{<<"Inception">>, get_inception(Call)}
+                            ,{<<"Custom-Channel-Vars">>, wh_json:from_list(get_ccvs(Data))}
                             | wh_api:default_headers(cf_exe:queue_name(Call), ?APP_NAME, ?APP_VERSION)
                            ]).
 
@@ -121,6 +122,22 @@ get_account_realm(Call) ->
         {'ok', JObj} -> wh_json:get_value(<<"realm">>, JObj);
         {'error', _} -> 'undefined'
     end.
+
+-spec get_ccvs(wh_json:object()) -> wh_proplist().
+get_ccvs(Data) ->
+    AccountID = wh_json:get_value(<<"account_id">>, Data),
+    OwnerID = wh_json:get_value(<<"owner_id">>, Data),
+    UserName = wh_json:get_value(<<"username">>, Data),
+    AccountRealm = wh_util:get_account_realm(AccountID),
+    Realm = wh_json:get_value(<<"realm">>, Data, AccountRealm),
+
+    props:filter_undefined(
+      [{<<"Account-ID">>, AccountID}
+       ,{<<"Owner-ID">>, OwnerID}
+       ,{<<"Username">>, UserName}
+       ,{<<"Realm">>, Realm}
+       ,{<<"Account-Realm">>, AccountRealm}
+      ]).
 
 -spec get_caller_id(wh_json:object(), whapps_call:call()) -> {api_binary(), api_binary()}.
 get_caller_id(Data, Call) ->
