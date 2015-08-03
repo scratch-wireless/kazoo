@@ -186,6 +186,42 @@ Useful for resellers.
 
     `curl -X POST -H "X-Auth-Token:{AUTH_TOKEN}"  http://{SERVER_IP}/v2/accounts/{ACCOUNT_ID}/service_plans/{SERVICE_PLAN_ID} -d '{"data":{"id":"service_plan_id"}'`
 
+#### Response
+
+```json
+{
+    "data": {} // Service plan
+    "status": "success"
+}
+```
+
+### Adding multiple service plans to an account.
+
+Useful for resellers.
+
+#### Request
+
+- Verb: `POST`
+- Url: `/v2/accounts/{ACCOUNT_ID}/service_plans`
+- Payload:
+
+```json
+{
+    "data": {
+        "plans": ["plan1", "plan2"]
+    }
+}
+```
+
+#### Response
+
+```json
+{
+    "data": {} // Merge of the Service plans
+    "status": "success"
+}
+```
+
 ### Removing service plan from an account.
 
 Useful for resellers.
@@ -525,3 +561,48 @@ This api will list the services plan that can be applied to your account
      "status": "success",
      "auth_token": "{AUTH_TOKEN}"
     }
+
+### Override a plan
+
+**Must be super duper admin**
+
+#### Request
+
+- Verb: `POST`
+- Url: `/v2/accounts/{ACCOUNT_ID}/service_plans/{PLAN_ID}/override`
+- Payload:
+
+```json
+{
+    "data": {
+        "whitelabel": {
+            "_all": {
+                "activation_charge": 700
+            }
+        }
+
+    }
+}
+```
+
+#### Response
+
+All override payload
+
+```json
+{
+    "data": {
+        "whitelabel": {
+            "_all": {
+                "name": "Whitelabel",
+                "as": "whitelabel",
+                "exceptions": [],
+                "activation_charge": 700,
+                "cascade": true,
+                "rate": 300
+            }
+        }
+    },
+    "status": "success"
+}
+```
