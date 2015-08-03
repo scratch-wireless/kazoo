@@ -278,9 +278,9 @@ get_auth_user_in_account(Username, Realm, AccountDB) ->
 lookup_account_by_from(FromUser, IP) ->
     lager:debug("looking up FromUser: ~s and ~s in db ~s", [FromUser, IP, ?WH_SIP_DB]),
     case wh_cache:peek_local(?REG_CACHE, from_user_cache_key(FromUser)) of
-        {'ok', _AccountCCVs}=OK -> 
+        {'ok', _AccountCCVs} ->
             validate_account_domain(IP, _AccountCCVs);
-        {'error', 'not_found'} -> 
+        {'error', 'not_found'} ->
             fetch_account_by_from_user(FromUser, IP)
     end.
 
