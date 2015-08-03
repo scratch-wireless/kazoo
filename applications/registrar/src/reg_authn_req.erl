@@ -286,7 +286,7 @@ lookup_account_by_from(FromUser, IP) ->
 
 -spec validate_account_domain(ne_binary(), wh_proplist()) -> 
                                      {'ok', wh_proplist()} |
-                                     {'error', 'not_found'}
+                                     {'error', 'not_found'}.
 validate_account_domain(IP, AccountCCVs) ->
     Regex = wh_json:get_value(<<"From-Domain">>, AccountCCVs),
     lager:debug("comparing IP ~s against regex ~s", [IP, Regex]),
