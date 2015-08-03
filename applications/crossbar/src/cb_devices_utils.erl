@@ -8,7 +8,9 @@
 %%%-------------------------------------------------------------------
 -module(cb_devices_utils).
 
--export([is_ip_unique/2]).
+-export([is_ip_unique/2
+         ,is_from_user_unique/2
+        ]).
 
 -include("./crossbar.hrl").
 
@@ -109,4 +111,20 @@ extract_ip(_Key, Value, Acc) ->
                                ])
              |Acc
             ]
+    end.
+
+%%--------------------------------------------------------------------
+%% @public
+%% @doc
+%% Check if the device sip from user is unique
+%% @end
+%%--------------------------------------------------------------------
+-spec is_from_user_unique(ne_binary(), ne_binary()) -> boolean().
+is_ip_unique(FromUser, DeviceId) ->
+    ViewOptions = [{<<"key">>, FromUser}],
+    case couch_mgr:get_results(?WH_SIP_DB, <<"credentials/lookup_by_from_user">>, ViewOptions) of
+        {'ok', []} -> 'true';
+        {'ok', [JObj]} -> wh_json:get_value(<<"id">>, JObj) =:= DeviceId;
+        {'error', 'not_found'} -> 'true';
+        _ -> 'false'
     end.

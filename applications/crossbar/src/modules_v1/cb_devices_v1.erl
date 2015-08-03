@@ -339,12 +339,15 @@ validate_device_creds(Realm, DeviceId, Context) ->
         <<"ip">> ->
             IP = cb_context:req_value(Context, [<<"sip">>, <<"ip">>]),
             validate_device_ip(IP, DeviceId, Context);
+        <<"from_header">> ->
+            FromUser = cb_context:req_value(Context, [<<"sip">>, <<"from_header">>, <<"user">>]),
+            validate_device_from_user(FromUser, DeviceId, Context);
         Else ->
             C = cb_context:add_validation_error(
                   [<<"sip">>, <<"method">>]
                   ,<<"enum">>
                   ,wh_json:from_list([{<<"message">>, <<"SIP authentication method is invalid">>}
-                                      ,{<<"target">>, [<<"password">>, <<"ip">>]}
+                                      ,{<<"target">>, [<<"password">>, <<"ip">>, <<"from_header">>]}
                                       ,{<<"cause">>, Else}
                                      ])
                   ,Context
@@ -398,6 +401,24 @@ validate_device_ip_unique(IP, DeviceId, Context) ->
                     ,wh_json:from_list([
                         {<<"message">>, <<"SIP IP already in use">>}
                         ,{<<"cause">>, IP}
+                     ])
+                    ,Context
+                ),
+            check_emergency_caller_id(DeviceId, C)
+    end.
+
+-spec validate_device_from_user(ne_binary(), api_binary(), cb_context:context()) -> cb_context:context().
+validate_device_from_user(FromUser, DeviceId, Context) ->
+    case cb_devices_utils:is_from_user_unique(FromUser, DeviceId) of
+        'true' ->
+            check_emergency_caller_id(DeviceId, cb_context:store(Context, 'aggregate_device', 'true'));
+        'false' ->
+            C = cb_context:add_validation_error(
+                    [<<"sip">>, <<"from_header">>]
+                    ,<<"unique">>
+                    ,wh_json:from_list([
+                        {<<"message">>, <<"SIP From Header user already in use">>}
+                        ,{<<"cause">>, FromUser}
                      ])
                     ,Context
                 ),

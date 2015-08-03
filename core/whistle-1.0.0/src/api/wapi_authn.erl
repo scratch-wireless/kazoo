@@ -61,7 +61,7 @@
                                      ]).
 -define(AUTHN_RESP_VALUES, [{<<"Event-Category">>, <<"directory">>}
                            ,{<<"Event-Name">>, <<"authn_resp">>}
-                           ,{<<"Auth-Method">>, [<<"password">>, <<"ip">>
+                           ,{<<"Auth-Method">>, [<<"password">>, <<"ip">>, <<"from_header">>
                                                 ,<<"a1-hash">>, <<"error">>
                                                 ,<<"gsm">>, <<"nonce">>, <<"a3a8">>
                                                 ]}

@@ -71,7 +71,8 @@
                     "description": "Method of authentication",
                     "enum": [
                         "password",
-                        "ip"
+                        "ip",
+                        "from_header"
                     ],
                     "default": "password"
                 },
@@ -123,6 +124,20 @@
                     "name": "Realm",
                     "description": "The realm this device should use, overriding the account realm. Should rarely be necessary.",
                     "format": "uri"
+                },
+                "from_header": {
+                    "user": {
+                        "required": true,
+                        "type": "string"
+                    },
+                    "domain": {
+                        "required": true,
+                        "type": "string"
+                    },
+                    "description": "From header for this device",
+                    "name": "From header for this device",
+                    "required": false,
+                    "type": "object"
                 },
                 "route": {
                     "type": "string",

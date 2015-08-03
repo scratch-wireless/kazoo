@@ -12,6 +12,7 @@
 -export([init/0
          ,handle_req/2
          ,lookup_account_by_ip/1
+         ,lookup_account_by_from/2
         ]).
 
 -include("reg.hrl").
@@ -265,6 +266,56 @@ get_auth_user_in_account(Username, Realm, AccountDB) ->
             lager:debug("~s@~s found in account db: ~s", [Username, Realm, AccountDB]),
             {'ok', User}
     end.
+%%-----------------------------------------------------------------------------
+%% @private
+%% @doc
+%% lookup auth by FromUser in cache/database and return the result
+%% @end
+%%-----------------------------------------------------------------------------
+-spec lookup_account_by_from(ne_binary(), ne_binary()) ->
+                                  {'ok', wh_proplist()} |
+                                  couch_mgr:couchbeam_error().
+lookup_account_by_from(FromUser, IP) ->
+    lager:debug("looking up FromUser: ~s and ~s in db ~s", [FromUser, IP, ?WH_SIP_DB]),
+    case wh_cache:peek_local(?REG_CACHE, from_user_cache_key(FromUser)) of
+        {'ok', _AccountCCVs}=OK -> 
+            validate_account_domain(_AccountCCVs);
+        {'error', 'not_found'} -> 
+            fetch_account_by_from_user(FromUser)
+    end.
+
+-spec validate_account_domain(ne_binary(), wh_proplist()) -> 
+                                     {'ok', wh_proplist()} |
+                                     {'error', 'not_found'}
+validate_account_domain(IP, AccountCCVs) ->
+    Regex = wh_json:get_value(<<"From-Domain">>, AccountCCVs),
+    lager:debug("comparing IP ~s against regex ~s", [IP, Regex]),
+    case re:run(IP, Regex) of
+        {'match', _} -> {'ok', AccountCCVs};
+        'nomatch' -> {'error', 'not_found'}
+    end.
+
+-spec fetch_account_by_from_user(ne_binary()) ->
+                                 {'ok', wh_proplist()} |
+                                 couch_mgr:couchbeam_error().
+fetch_account_by_from_user(FromUser) ->
+    case couch_mgr:get_results(?WH_SIP_DB, <<"credentials/lookup_by_from_user">>, [{'key', FromUser}]) of
+        {'ok', []} ->
+            lager:debug("no entry in ~s for FromUser: ~s", [?WH_SIP_DB, FromUser]),
+            {'error', 'not_found'};
+        {'ok', [Doc|_]} ->
+            lager:debug("found FromUser ~s in db ~s (~s)", [FromUser, ?WH_SIP_DB, wh_json:get_value(<<"id">>, Doc)]),
+            AccountCCVs = account_ccvs_from_from_user_auth(Doc),
+            wh_cache:store_local(?REG_CACHE, from_user_cache_key(FromUser), AccountCCVs),
+            validate_account_domain(AccountCCVs);
+        {'error', _E} = Error ->
+            lager:debug("error looking up by FromUser: ~s: ~p", [FromUser, _E]),
+            Error
+    end.
+
+-spec from_user_cache_key(ne_binary()) -> {'from_user', ne_binary()}.
+from_user_cache_key(FromUser) ->
+    {'from_user', FromUser}.
 
 %%-----------------------------------------------------------------------------
 %% @private
@@ -322,6 +373,28 @@ account_ccvs_from_ip_auth(Doc) ->
        ,{<<"Username">>, UserName}
        ,{<<"Realm">>, Realm}
        ,{<<"Account-Realm">>, AccountRealm}
+      ]).
+
+-spec account_ccvs_from_from_user_auth(wh_json:object()) -> wh_proplist().
+account_ccvs_from_from_user_auth(Doc) ->
+    AccountID = wh_json:get_value([<<"value">>, <<"account_id">>], Doc),
+    OwnerID = wh_json:get_value([<<"value">>, <<"owner_id">>], Doc),
+    AuthType = wh_json:get_value([<<"value">>, <<"authorizing_type">>], Doc, <<"anonymous">>),
+    UserName = wh_json:get_value([<<"value">>, <<"username">>], Doc),
+    AccountRealm = wh_util:get_account_realm(AccountID),
+    Realm = wh_json:get_value([<<"value">>, <<"realm">>], Doc, AccountRealm),
+    FromDomain = wh_json:get_value([<<"value">>, <<"from_domain">>], Doc),
+
+    props:filter_undefined(
+      [{<<"Account-ID">>, AccountID}
+       ,{<<"Owner-ID">>, OwnerID}
+       ,{<<"Authorizing-ID">>, wh_json:get_value(<<"id">>, Doc)}
+       ,{<<"Inception">>, <<"on-net">>}
+       ,{<<"Authorizing-Type">>, AuthType}
+       ,{<<"Username">>, UserName}
+       ,{<<"Realm">>, Realm}
+       ,{<<"Account-Realm">>, AccountRealm}
+       ,{<<"From-Domain">>, FromDomain}
       ]).
 
 %%-----------------------------------------------------------------------------
