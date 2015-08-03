@@ -120,7 +120,7 @@ extract_ip(_Key, Value, Acc) ->
 %% @end
 %%--------------------------------------------------------------------
 -spec is_from_user_unique(ne_binary(), ne_binary()) -> boolean().
-is_ip_unique(FromUser, DeviceId) ->
+is_from_user_unique(FromUser, DeviceId) ->
     ViewOptions = [{<<"key">>, FromUser}],
     case couch_mgr:get_results(?WH_SIP_DB, <<"credentials/lookup_by_from_user">>, ViewOptions) of
         {'ok', []} -> 'true';
