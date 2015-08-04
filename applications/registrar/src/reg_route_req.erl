@@ -48,13 +48,13 @@ maybe_replay_route_req(JObj, CCVs, IP) ->
              );
         {'error', _E} ->
             lager:debug("failed to find account information from IP ~s", [IP]),
-            handle_missing_account_id_using_from(JObj, CCVs, wh_json:get_value(<<"From">>, JObj), IP)
+            lookup_account_using_from(JObj, CCVs, wh_json:get_value(<<"From">>, JObj), IP)
     end.
 
--spec handle_missing_account_id_using_from(wh_json:object(), wh_json:object(), api_binary(), api_binary()) -> 'ok'.
-handle_missing_account_id_using_from(_JObj, _CCVs, 'undefined', _IP) ->
+-spec lookup_account_using_from(wh_json:object(), wh_json:object(), api_binary(), api_binary()) -> 'ok'.
+lookup_account_using_from(_JObj, _CCVs, 'undefined', _IP) ->
     lager:debug("failed to find account information since there was no from user to use");
-handle_missing_account_id_using_from(JObj, CCVs, FromUser, IP) ->
+lookup_account_using_from(JObj, CCVs, FromUser, IP) ->
     case reg_authn_req:lookup_account_by_from(FromUser, IP) of
         {'ok', AccountCCVs} ->
             lager:debug("authz request was missing account information, loading from FromUser ~s and IP ~s and replaying", [FromUser, IP]),
