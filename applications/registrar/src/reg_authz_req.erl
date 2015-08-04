@@ -48,7 +48,9 @@ handle_missing_account_id(JObj, CCVs, IP) ->
              );
         {'error', _E} ->
             lager:debug("failed to find account information from IP ~s", [IP]),
-            handle_missing_account_id_using_from(JObj, CCVs, wh_json:get_value(<<"From">>, JObj), IP)
+            FromHeader = wh_json:get_value(<<"From">>, JObj),
+            [FromUser, _] = binary:split(FromHeader, <<"@">>),
+            handle_missing_account_id_using_from(JObj, CCVs, FromUser, IP)
     end.
 
 -spec handle_missing_account_id_using_from(wh_json:object(), wh_json:object(), api_binary(), api_binary()) -> 'ok'.

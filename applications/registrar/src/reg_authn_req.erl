@@ -288,11 +288,15 @@ lookup_account_by_from(FromUser, IP) ->
                                      {'ok', wh_proplist()} |
                                      {'error', 'not_found'}.
 validate_account_domain(IP, AccountCCVs) ->
-    Regex = wh_json:get_value(<<"From-Domain">>, AccountCCVs),
+    Regex = props:get_value(<<"From-Domain">>, AccountCCVs),
     lager:debug("comparing IP ~s against regex ~s", [IP, Regex]),
     case re:run(IP, Regex) of
-        {'match', _} -> {'ok', AccountCCVs};
-        'nomatch' -> {'error', 'not_found'}
+        {'match', _} ->
+            lager:debug("From domain is authorized"),
+            {'ok', AccountCCVs};
+        'nomatch' ->
+            lager:debug("From domain is NOT authorized"),
+            {'error', 'not_found'}
     end.
 
 -spec fetch_account_by_from_user(ne_binary(), ne_binary()) ->
