@@ -38,12 +38,37 @@
 %%--------------------------------------------------------------------
 -spec handle(wh_json:object(), whapps_call:call()) -> 'ok'.
 handle(Data, Call) ->
+     case maybe_owner_called_self(Data, Call) of
+         'ok' -> make_offnet_request(Data, Call);
+         {'error', 'owner_called_self'} -> cf_exe:continue(Call)
+     end.
+
+-spec make_offnet_request(wh_json:object(), whapps_call:call()) -> 'ok'.
+make_offnet_request(Data, Call) ->
     'ok' = wapi_offnet_resource:publish_req(build_offnet_request(Data, Call)),
     case wait_for_stepswitch(Call) of
         {<<"SUCCESS">>, _} ->
             lager:info("completed successful offnet request"),
             cf_exe:stop(Call);
         {Cause, Code} -> handle_bridge_failure(Cause, Code, Call)
+    end.
+
+-spec maybe_owner_called_self(wh_json:object(), whapps_call:call()) ->
+                                     'ok' |
+                                     {'error', 'owner_called_self'}.
+maybe_owner_called_self(Data, Call) ->
+    CanCallSelf = wh_json:is_true(<<"can_call_self">>, Data),
+    ResourceOwnerID = wh_json:get_value(<<"owner_id">>, Data),
+    OwnerId = whapps_call:kvs_fetch('owner_id', Call),
+    case CanCallSelf
+        orelse (not is_binary(OwnerId))
+        orelse (not is_binary(ResourceOwnerID))
+        orelse ResourceOwnerID =/= OwnerId
+    of
+        'true' -> 'ok';
+        'false' ->
+            lager:info("owner ~s stop calling your self...stop calling your self...", [OwnerId]),
+            {'error', 'owner_called_self'}
     end.
 
 -spec handle_bridge_failure(api_binary(), api_binary(), whapps_call:call()) -> 'ok'.
