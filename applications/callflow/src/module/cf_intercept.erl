@@ -39,7 +39,8 @@ handle(Data, Call) ->
             {'ok', 'true'} -> continue(Data, Call);
             {'ok', 'false'} -> no_permission_to_intercept(Call);
             {'error', 'not_found'} ->
-                case maybe_same_user(Data, Call)
+                case wh_json:is_true(<<"use_calling_user">>, Data, 'false')
+                    orelse maybe_same_user(Data, Call)
                     orelse maybe_same_group(Data, Call)
                 of
                     'true' -> continue(Data, Call);
@@ -119,7 +120,7 @@ is_owner_same_group(Call, DeviceId, OwnerId, GroupId) ->
 
 -spec continue(wh_json:object(), whapps_call:call()) -> any().
 continue(Data, Call) ->
-    case find_sip_endpoints(Data, Call) of
+    case maybe_find_sip_endpoints(Data, Call) of
         [] -> no_users(Call);
         Usernames -> connect_to_channel(Usernames, Call)
     end.
@@ -276,6 +277,18 @@ intercept_event(_Call, {<<"call_event">>,<<"CHANNEL_BRIDGE">>}, _Evt) ->
 intercept_event(Call, _Type, _Evt) ->
     lager:debug("unhandled evt ~p", [_Type]),
     wait_for_intercept(Call).
+
+-spec maybe_find_sip_endpoints(wh_json:object(), whapps_call:call()) ->
+                                ne_binaries().
+maybe_find_sip_endpoints(Data, Call) ->
+    case wh_json:is_true(<<"use_calling_user">>, Data, 'false') of
+        'true' ->
+            CallingUserId = whapps_call:kvs_fetch('owner_id', Call),
+            cf_util:sip_users_from_device_ids(
+              cf_util:find_user_endpoints([CallingUserId], [], Call), Call
+             );
+        'false' -> find_sip_endpoints(Data, Call)
+    end.
 
 -spec find_sip_endpoints(wh_json:object(), whapps_call:call()) ->
                                 ne_binaries().
