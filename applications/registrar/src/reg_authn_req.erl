@@ -293,7 +293,7 @@ validate_account_domain(IP, AccountCCVs) ->
     case re:run(IP, Regex) of
         {'match', _} ->
             lager:debug("From domain is authorized"),
-            {'ok', AccountCCVs};
+            {'ok', props:delete(<<"From-Domain">>, AccountCCVs)};
         'nomatch' ->
             lager:debug("From domain is NOT authorized"),
             {'error', 'not_found'}

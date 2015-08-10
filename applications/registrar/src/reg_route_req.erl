@@ -60,7 +60,7 @@ lookup_account_using_from(JObj, CCVs, FromUser, IP) ->
     case reg_authn_req:lookup_account_by_from(FromUser, IP) of
         {'ok', AccountCCVs} ->
             lager:debug("authz request was missing account information, loading from FromUser ~s and IP ~s and replaying", [FromUser, IP]),
-            wapi_authz:publish_authz_req(
+            wapi_route:publish_req(
               wh_json:set_value(<<"Custom-Channel-Vars">>
                                 ,wh_json:set_values(AccountCCVs, CCVs)
                                 ,JObj
