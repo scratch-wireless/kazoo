@@ -15,6 +15,9 @@
 -export([set_item/2
          ,item/1
         ]).
+-export([set_name/2
+         ,name/1
+        ]).
 -export([set_quantity/2
          ,quantity/1
         ]).
@@ -42,12 +45,16 @@
 -export([set_minimum/2
          ,minimum/1
         ]).
+-export([set_exceptions/2
+         ,exceptions/1
+        ]).
 
 
 -include("whistle_services.hrl").
 
 -record(wh_service_item, {category :: api_binary()
                           ,item :: api_binary()
+                          ,name :: api_binary()
                           ,quantity = 0 :: api_integer()
                           ,rate = 0.0 :: api_float()
                           ,single_discount = 'false' :: boolean()
@@ -57,6 +64,7 @@
                           ,bookkeepers = wh_json:new() :: wh_json:object()
                           ,activation_charge = 0.00 :: api_float()
                           ,minimum = 0 :: api_integer()
+                          ,exceptions = [] :: ne_binaries()
                          }).
 
 -type item() :: #wh_service_item{}.
@@ -75,6 +83,7 @@
 public_json(Item) ->
     Props = [{<<"category">>, Item#wh_service_item.category}
              ,{<<"item">>, Item#wh_service_item.item}
+             ,{<<"name">>, Item#wh_service_item.name}
              ,{<<"quantity">>, Item#wh_service_item.quantity}
              ,{<<"rate">>, Item#wh_service_item.rate}
              ,{<<"single_discount">>, Item#wh_service_item.single_discount}
@@ -83,6 +92,7 @@ public_json(Item) ->
              ,{<<"cumulative_discount_rate">>, Item#wh_service_item.cumulative_discount_rate}
              ,{<<"activation_charge">>, Item#wh_service_item.activation_charge}
              ,{<<"minimum">>, Item#wh_service_item.minimum}
+             ,{<<"exceptions">>, Item#wh_service_item.exceptions}
             ],
     wh_json:from_list(props:filter_undefined(Props)).
 
@@ -135,6 +145,26 @@ item(#wh_service_item{item=Item}) ->
 -spec set_item(ne_binary(), item()) -> item().
 set_item(Item, #wh_service_item{}=ServiceItem) ->
     ServiceItem#wh_service_item{item=Item}.
+
+%%--------------------------------------------------------------------
+%% @public
+%% @doc
+%%
+%% @end
+%%--------------------------------------------------------------------
+-spec name(item()) -> api_binary().
+name(#wh_service_item{name=Name}) ->
+    Name.
+
+%%--------------------------------------------------------------------
+%% @public
+%% @doc
+%%
+%% @end
+%%--------------------------------------------------------------------
+-spec set_name(ne_binary(), item()) -> item().
+set_name(Name, #wh_service_item{}=ServiceItem) ->
+    ServiceItem#wh_service_item{name=Name}.
 
 %%--------------------------------------------------------------------
 %% @public
@@ -330,3 +360,22 @@ minimum(#wh_service_item{minimum=Min}) -> Min.
 -spec set_minimum(integer(), item()) -> item().
 set_minimum(Min, ServiceItem) ->
     ServiceItem#wh_service_item{minimum=Min}.
+
+%%--------------------------------------------------------------------
+%% @public
+%% @doc
+%%
+%% @end
+%%--------------------------------------------------------------------
+-spec exceptions(item()) -> ne_binaries().
+exceptions(#wh_service_item{exceptions=Exc}) -> Exc.
+
+%%--------------------------------------------------------------------
+%% @public
+%% @doc
+%%
+%% @end
+%%--------------------------------------------------------------------
+-spec set_exceptions(ne_binaries(), item()) -> item().
+set_exceptions(Exc, ServiceItem) ->
+    ServiceItem#wh_service_item{exceptions=Exc}.

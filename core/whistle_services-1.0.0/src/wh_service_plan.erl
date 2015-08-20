@@ -78,6 +78,8 @@ create_items(ServicePlan, ServiceItems, Services, CategoryId, ItemId) ->
 
     Charge = activation_charges(CategoryId, ItemId, ServicePlan),
     Min = kzd_service_plan:item_minimum(ServicePlan, CategoryId, ItemId),
+    Name = kzd_service_plan:item_name(ServicePlan, CategoryId, ItemId),
+    Exc = kzd_service_plan:item_exceptions(ServicePlan, CategoryId, ItemId),
 
     %% allow service plans to re-map item names (IE: softphone items "as" sip_device)
     As = kzd_item_plan:masquerade_as(ItemPlan, ItemId),
@@ -85,12 +87,14 @@ create_items(ServicePlan, ServiceItems, Services, CategoryId, ItemId) ->
 
     Routines = [fun(I) -> wh_service_item:set_category(CategoryId, I) end
                 ,fun(I) -> wh_service_item:set_item(As, I) end
+                ,fun(I) -> wh_service_item:set_name(Name, I) end
                 ,fun(I) -> wh_service_item:set_quantity(Quantity, I) end
                 ,fun(I) -> wh_service_item:set_rate(Rate, I) end
                 ,fun(I) -> maybe_set_discounts(I, ItemPlan) end
                 ,fun(I) -> wh_service_item:set_bookkeepers(bookkeeper_jobj(CategoryId, As, ServicePlan), I) end
                 ,fun(I) -> wh_service_item:set_activation_charge(Charge, I) end
                 ,fun(I) -> wh_service_item:set_minimum(Min, I) end
+                ,fun(I) -> wh_service_item:set_exceptions(Exc, I) end
                ],
     ServiceItem = lists:foldl(fun(F, I) -> F(I) end
                               ,wh_service_items:find(CategoryId, As, ServiceItems)
