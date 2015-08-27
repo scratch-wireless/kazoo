@@ -942,6 +942,7 @@ create_sip_endpoint(Endpoint, Properties, #clid{}=Clid, Call) ->
          ,{<<"Custom-SIP-Headers">>, generate_sip_headers(Endpoint, Call)}
          ,{<<"Custom-Channel-Vars">>, generate_ccvs(Endpoint, Call)}
          ,{<<"Flags">>, get_outbound_flags(Endpoint)}
+         ,{<<"Hunt-Account-ID">>, get_hunt_account_id(Endpoint, Call)}
          ,{<<"Ignore-Completed-Elsewhere">>, get_ignore_completed_elsewhere(Endpoint)}
          ,{<<"Failover">>, maybe_build_failover(Endpoint, Clid, Call)}
          ,{<<"Metaflows">>, wh_json:get_value(<<"metaflows">>, Endpoint)}
@@ -1111,6 +1112,7 @@ create_call_fwd_endpoint(Endpoint, Properties, Call) ->
             ,{<<"Endpoint-Timeout">>, get_timeout(Properties)}
             ,{<<"Endpoint-Delay">>, get_delay(Properties)}
             ,{<<"Presence-ID">>, cf_attributes:presence_id(Endpoint, Call)}
+            ,{<<"Hunt-Account-ID">>, get_hunt_account_id(Endpoint, Call)}
             ,{<<"Callee-ID-Name">>, Clid#clid.callee_name}
             ,{<<"Callee-ID-Number">>, Clid#clid.callee_number}
             ,{<<"Outbound-Callee-ID-Name">>, Clid#clid.callee_name}
@@ -1481,6 +1483,15 @@ get_ignore_completed_elsewhere(JObj) ->
     of
         'undefined' -> whapps_config:get_is_true(?CF_CONFIG_CAT, <<"default_ignore_completed_elsewhere">>, 'true');
         IgnoreCompletedElsewhere -> wh_util:is_true(IgnoreCompletedElsewhere)
+    end.
+
+-spec get_hunt_account_id(wh_json:object(), whapps_call:call()) -> api_binary().
+get_hunt_account_id(Endpoint, Call) ->
+    case wh_json:is_true(<<"use_local_resources">>, Endpoint, 'true') of
+        'false' -> 'undefined';
+        'true' ->
+            AccountId = whapps_call:account_id(Call),
+            wh_json:get_value(<<"hunt_account_id">>, Endpoint, AccountId)
     end.
 
 -spec is_sms(whapps_call:call()) -> boolean().
