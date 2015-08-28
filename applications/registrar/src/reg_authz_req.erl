@@ -60,12 +60,29 @@ handle_missing_account_id_using_from(JObj, CCVs, FromUser, IP) ->
     case reg_authn_req:lookup_account_by_from(FromUser, IP) of
         {'ok', AccountCCVs} ->
             lager:debug("authz request was missing account information, loading from FromUser ~s and IP ~s and replaying", [FromUser, IP]),
+            Req = maybe_add_caller_id_to_request(JObj, AccountCCVs),
             wapi_authz:publish_authz_req(
               wh_json:set_value(<<"Custom-Channel-Vars">>
                                 ,wh_json:set_values(AccountCCVs, CCVs)
-                                ,JObj
+                                ,Req
                                )
              );
         {'error', _E} ->
             lager:debug("failed to find account information from FromUser ~s and IP ~s, not replaying authz req", [FromUser, IP])
+    end.
+
+-spec maybe_add_caller_id_to_request(wh_json:object(), wh_proplist()) -> wh_json:object().
+maybe_add_caller_id_to_request(JObj, CCVs) ->
+    AccountId = props:get_value(<<"Account-ID">>, CCVs),
+    AccountDb = wh_util:format_account_id(AccountId, 'encoded'),
+    DeviceId = props:get_value(<<"Authorizing-ID">>, CCVs),
+    case couch_mgr:open_cache_doc(AccountDb, DeviceId) of
+        {'error', _err} -> JObj;
+        {'ok', DeviceDoc} ->
+            Name = wh_json:get_ne_value([<<"caller_id">>, <<"external">>, <<"name">>], DeviceDoc),
+            Number = wh_json:get_ne_value([<<"caller_id">>, <<"external">>, <<"number">>], DeviceDoc),
+            lager:info("setting caller id to ~s <~s>", [Number, Name]),
+            wh_json:set_values([{<<"Caller-ID-Name">>, Name}
+                                ,{<<"Caller-ID-Number">>, Number}
+                               ], JObj)
     end.
