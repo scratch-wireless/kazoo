@@ -2079,7 +2079,8 @@ find_max_message_length([JObj | T]) ->
 
 -spec is_owner(whapps_call:call(), ne_binary()) -> boolean().
 is_owner(Call, OwnerId) ->
-    case whapps_call:owner_id(Call) of
+    DefaultOwner = whapps_call:owner_id(Call),
+    case whapps_call:kvs_fetch('owner_id', DefaultOwner, Call) of
         <<>> -> 'false';
         'undefined' -> 'false';
         OwnerId -> 'true';
