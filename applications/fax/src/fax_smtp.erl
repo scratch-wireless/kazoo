@@ -78,22 +78,13 @@ init(Hostname, SessionCount, Address, Options) ->
                          {'ok', pos_integer(), state()} |
                          {'ok', state()} |
                          error_message().
-handle_HELO(<<"invalid">>, State) ->
-    %% contrived example
-    {'error', "554 invalid hostname", State};
-handle_HELO(<<"trusted_host">>, State) ->
-    {'ok', State}; %% no size limit because we trust them.
 handle_HELO(Hostname, State) ->
     lager:debug("HELO from ~s", [Hostname]),
-    {'ok', 655360, State}. % 640kb of HELO should be enough for anyone.
-%% If {ok, State} was returned here, we'd use the default 10mb limit
+    {'ok', State}.
 
 -spec handle_EHLO(binary(), list(), state()) ->
                          {'ok', list(), state()} |
                          error_message().
-handle_EHLO(<<"invalid">>, _Extensions, State) ->
-    %% contrived example
-    {'error', "554 invalid hostname", State};
 handle_EHLO(Hostname, Extensions, #state{options=Options}=State) ->
     lager:debug("EHLO from ~s", [Hostname]),
     %% You can advertise additional extensions, or remove some defaults
@@ -146,7 +137,7 @@ handle_DATA(From, To, Data, #state{options=Options}=State) ->
     %% JMA: Can this be done with wh_util:rand_hex_binary() ?
     Reference = lists:flatten(
                   [io_lib:format("~2.16.0b", [X])
-                   || <<X>> <= erlang:md5(term_to_binary(erlang:now()))
+                   || <<X>> <= erlang:md5(term_to_binary(wh_util:now()))
                   ]),
 
     try mimemail:decode(Data) of
